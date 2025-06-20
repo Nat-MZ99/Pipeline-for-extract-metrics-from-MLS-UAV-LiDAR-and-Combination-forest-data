@@ -1,0 +1,8 @@
+Tutorial de Instalação do AdTree
+
+Passo 1: Acesse o link abaixo e baixe a versão do AdTree compatível com o seu sistema operacional (Windows, Linux ou macOS):
+🔗 https://github.com/tudelft3d/adtree/releases
+
+Passo 2: Extraia os arquivos e mova a pasta para um diretório de sua preferência.
+
+Passo 3: Pronto! O AdTree está pronto para uso.

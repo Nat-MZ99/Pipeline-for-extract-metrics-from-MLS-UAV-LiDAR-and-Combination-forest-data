@@ -1,0 +1,1468 @@
+# Processamento de nuvens MLS florestais a nível de árvore - DTM, DSM, CHM, Segmentação em instância e semântica + extração de \~200 métricas
+
+## Pacotes
+
+### Instalar pacotes necessários
+
+```{r}
+install.packages("FORTLS")
+install.packages("lidR")
+install.packages("raster")
+install.packages("sf")
+install.packages("future")
+install.packages("rlang")
+install.packages("dplyr")
+install.packages("devtools")
+install.packages("EnvStats")
+install.packages("reticulate")
+library(reticulate)
+reticulate::py_install("jakteristics", pip=TRUE)
+library(devtools)
+devtools::install_github("lmterryn/ITSMe", build_vignettes = TRUE)
+devtools::install_github("tiagodc/TreeLS")
+devtools::install_github("Blecigne/lidUrb")
+```
+
+### Carregar pacotes necessários
+
+```{r include=FALSE}
+library(parallel)
+library(rgl)
+library(stringr)
+library(lidR)
+library(raster)
+library(sf)
+library(future)
+library(TreeLS)
+library(rlang)
+library(dplyr)
+library(ITSMe)
+library(tidyr)
+library(EnvStats)
+library(lidUrb)
+library(reticulate)
+library(ForestClassR)
+library(dbscan)
+library(terra)
+library(readr)
+library(purrr)
+library(Morpho)
+```
+
+## Processamento inicial
+
+### Definir funções
+
+```{r}
+pre_processamento <- function(ctg, out, f_class_solo, res) {
+  # 1. Definição e criação de diretórios
+  cat("Criando diretórios de saída...\n")
+  p_temp  <- paste0(out, "/temp/")      # Path for temporary files
+  p_las_g <- paste0(out, "/LAS_ground/") # Path for LAS de retorno do solo
+  p_dtm   <- paste0(out, "/dtm/")        # Path para DTM (modelo digital do terreno)
+  p_dsm   <- paste0(out, "/dsm/")        # Path para DSM (modelo digital da superfície)
+  p_chm   <- paste0(out, "/chm/")        # Path para CHM (modelo de altura de copa)
+  p_las_n <- paste0(out, "/LAS_norm/")   # Path para LAS normalizado
+  
+  sapply(c(p_temp, p_las_g, p_dtm, p_dsm, p_chm, p_las_n), function(x) {
+    if (!dir.exists(x)) {
+      dir.create(x, recursive = TRUE)
+      cat("Diretório criado:", x, "\n")
+    } else {
+      cat("Diretório já existe:", x, "\n")
+    }
+  })
+  
+  # 2. Classificação do Solo
+  cat("Iniciando classificação do solo usando CSF...\n")
+  opt_output_files(ctg) <- paste0(p_las_g, "/{*}_ground")
+  ctg <- classify_ground(ctg, f_class_solo)
+  cat("Classificação do solo concluída.\n")
+  
+  # 3. Geração de DSM e DTM
+  # DSM
+  cat("Gerando DSM (Digital Surface Model)...\n")
+  opt_output_files(ctg) <- paste0(p_dsm, "/{*}_dsm")
+  rasterize_canopy(ctg, res = res, algorithm = p2r(na.fill = tin()))
+  cat("\nDSM gerado.\n")
+  
+  # DTM
+  cat("Gerando DTM (Digital Terrain Model)...\n")
+  opt_output_files(ctg) <- paste0(p_dtm, "/{*}_dtm")
+  rasterize_terrain(ctg, res = res, algorithm = tin())
+  cat("\nDTM gerado.\n")
+  
+  # 4. Normalização e Geração do CHM
+  cat("Normalizando altura e gerando CHM (Canopy Height Model)...\n")
+  opt_output_files(ctg) <- paste0(p_las_n, "/{*}_norm")
+  ctg <- normalize_height(ctg, tin())
+  ctg_norm <- ctg
+  opt_output_files(ctg) <- paste0(p_chm, "/{*}_chm")
+  rasterize_canopy(ctg, res = res, algorithm = p2r(na.fill = tin()))
+  cat("\nCHM gerado.\n")
+  
+  # 5. Criação dos mosaicos para DSM, DTM e CHM
+  cat("Criando mosaicos a partir dos arquivos .tif...\n")
+  
+  # Função interna para criar mosaico a partir de uma subpasta
+  mosaic_from_folder <- function(sub_folder) {
+    folder <- file.path(out, sub_folder)
+    arquivos <- list.files(folder, pattern = "\\.tif$", full.names = TRUE)
+    if (length(arquivos) == 0) {
+      cat("Nenhum arquivo .tif encontrado em", folder, "\n")
+      return(NULL)
+    }
+    rasters <- lapply(arquivos, raster)
+    mosaico <- do.call(merge, rasters)
+    cat("Mosaico criado para a pasta:", sub_folder, "\n")
+    return(mosaico)
+  }
+  
+  tryCatch({
+    dsm <- mosaic_from_folder("dsm")
+  }, error = function(e) {
+    cat("Erro ao criar mosaico DSM:", e$message, "\n")
+  })
+  
+  tryCatch({
+    dtm <- mosaic_from_folder("dtm")
+  }, error = function(e) {
+    cat("Erro ao criar mosaico DTM:", e$message, "\n")
+  })
+  
+  tryCatch({
+    chm <- mosaic_from_folder("chm")
+  }, error = function(e) {
+    cat("Erro ao criar mosaico CHM:", e$message, "\n")
+  })
+  
+  # 6. Salvando os mosaicos (opcional)
+  cat("Salvando mosaicos...\n")
+  try({
+    writeRaster(dsm, file.path(out, "mosaico_dsm.tif"))
+    writeRaster(dtm, file.path(out, "mosaico_dtm.tif"))
+    writeRaster(chm, file.path(out, "mosaico_chm.tif"))
+  })
+  cat("Mosaicos salvos com sucesso.\n")
+  
+  cat("Pré-processamento concluído.\n")
+  
+  # Retorna uma lista com os principais objetos processados
+  return(list(
+    ctg_norm = ctg_norm,
+    dsm = if(exists("dsm")) dsm else NA,
+    dtm = if(exists("dtm")) dtm else NA,
+    chm = if(exists("chm")) chm else NA
+  ))
+}
+
+estatisticas_e_recorte <- function(files, shp, crop) {
+  cat("Iniciando processamento dos arquivos...\n")
+  estatisticas_df <- NULL
+  
+  # Criação do diretório para armazenar os rasters cortados (crop)
+  if (!dir.exists(crop)) {
+    dir.create(crop, recursive = TRUE)
+    cat("Diretório criado:", crop, "\n")
+  } else {
+    cat("Diretório já existe:", crop, "\n")
+  }
+  
+  # Função interna para calcular estatísticas do raster
+  estatisticas <- function(r) {
+    valores <- values(r, na.rm = TRUE)
+    data.frame(
+      Min = min(valores),
+      Max = max(valores),
+      Media = mean(valores),
+      Mediana = median(valores),
+      Desvio_Padrao = sd(valores)
+    )
+  }
+  
+  # Loop para processar cada arquivo
+  for (i in seq_along(files)) {
+    file <- files[i]
+    cat("Processando arquivo", i, "de", length(files), ":", basename(file), "\n")
+    
+    # Leitura do raster
+    r <- rast(file)
+    crs(r) <- crs(shp)
+    
+    # Crop e mask usando o shapefile
+    r <- crop(r, ext(shp))
+    r <- mask(r, shp)
+    
+    # Plot do raster processado
+    plot(r, main = paste("Raster cortado:", basename(file)))
+    
+    # Salvamento do raster cortado
+    out_file <- file.path(crop, paste0("MLS_crop_", basename(file)))
+    writeRaster(r, out_file, overwrite = TRUE)
+    cat("Raster salvo em:", out_file, "\n")
+    
+    # Cálculo das estatísticas e inclusão do nome do arquivo
+    estat <- estatisticas(r)
+    estat$Arquivo <- basename(file)
+    
+    # Acumula as estatísticas no data.frame
+    estatisticas_df <- rbind(estatisticas_df, estat)
+    cat("Estatísticas calculadas para", basename(file), "\n\n")
+  }
+  
+  cat("Processamento concluído.\n")
+  return(estatisticas_df)
+}
+```
+
+### Pré-processamento
+
+```{r}
+# CONFIGURAR MULTIPROCESSAMENTO
+plan(multisession, workers = (detectCores()-1))
+set_lidr_threads((detectCores()-1))
+
+# CRIAR TILES
+# Definir diretórios
+dir <- "D:/Estagio/08_Codigo/"
+nuvem <- paste0(dir, "/dados/") # dir da nuvem
+tiles <- paste0(nuvem, "/01_Tiles_MLS/")
+dir.create(tiles, recursive = TRUE)
+
+# Ler nuvem de pontos como ctg
+ctg <- readLAScatalog(paste0(nuvem))
+
+# Criar tiles
+opt_output_files(ctg) <- paste0(tiles, "/tile_{XLEFT}_{YBOTTOM}")
+opt_chunk_buffer(ctg) <- 0
+opt_chunk_size(ctg) <- 10 # retile to 250 m
+plot(ctg, chunk = TRUE)
+ctg <- catalog_retile(ctg) # apply retile
+
+# Checar las
+las_check(ctg)
+
+# PRÉ-PROCESSAMENTO
+# Definir diretórios
+dir <- "D:/Estagio/08_Codigo/"
+out <- paste0(dir, "/02_Pre_processamento/MLS/") # Diretório onde serão salvos os resultados do pré-processamento
+dir.create(out, recursive = TRUE)
+tiles <- paste0(dir, "/dados/01_Tiles_MLS/")
+
+# Ler tiles como catalog
+ctg <- readLAScatalog(tiles)
+
+# Executar função de pré-processamento
+f_class_solo = csf(class_threshold = 0.1) # Definir conforme teste do bloco abaixo
+resultados <- pre_processamento(ctg, out, f_class_solo, res = 0.5)
+
+# Checar resultados
+ctg <- readLAScatalog(paste0(out, "/LAS_norm/"))
+las_check(ctg)
+
+# Checar normalização (visualmente)
+coord <- unname(colMeans(st_coordinates(st_centroid(ctg$geometry))))
+las <- clip_circle(ctg, x = coord[1], y = coord[2], radius = 5)
+plot(las, color = "Classification", size = 0.6, bg = "white")
+
+# Salvar ctg tiles (para futuras investigações, se necessário)
+st_write(data.frame(filename = ctg$filename, geometry = st_geometry(ctg$geometry)), paste0(out, "/tiles.gpkg"))
+```
+
+#### Teste - Adaptar classificação de solo (execute antes da função "pre-processamento")
+
+```{r}
+# TESTE PARA DEFINIR CLASSIFICADOR DE SOLO
+ctg <- readLAScatalog(tiles)
+  # Recorte de amostra para testar classificadores
+  coord <- unname(colMeans(st_coordinates(st_centroid(ctg$geometry))))
+  las <- clip_circle(ctg, x = coord[1], y = coord[2], radius = 10)
+  las <- classify_ground(las, csf(class_threshold = 0.1)) # Funciona bem para a maioria dos casos
+  #las2 <- las[las$Classification == 2]
+  #plot(las2)
+  #las3 <- las[las$Classification != 2]
+  #plot(las3)
+  gnd <- filter_ground(las)
+  plot(gnd, size = 1, bg = "white") 
+  plot(las, color = "Classification", size = 0.6, bg = "white")
+```
+
+### Recortar dsm, dtm e chm e gerar estatísticas para área de interesse (opcional)
+
+```{r}
+library(terra)
+dir <- "D:/Estagio/08_Codigo/"
+pasta <- paste0(dir, "/02_Pre_processamento/MLS/")
+files <- list.files(pasta, pattern = ".tif$", full.names = TRUE)
+aoi <- vect(paste0(dir, "/shp_teste/aoi.gpkg"))
+crop <- paste0(pasta, "/crop/") # Pasta onde serão salvos os recortes
+dir.create(crop)
+
+results <- estatisticas_e_recorte(files, aoi, crop)
+```
+
+## Segmentação de árvores individuais (em instância)
+
+### Definir funções
+
+```{r}
+cortar_fileiras <- function(ctg, shp, out, format, plot_f, rot_m) {
+  
+  pb <- txtProgressBar(min = 0, max = nrow(shp), style = 3)
+  shp <- st_transform(shp, st_crs(ctg))
+  
+  for (i in seq_len(nrow(shp))) {
+    tryCatch({
+      las <- lidR::clip_roi(ctg, shp[i, ]) |> lidR::filter_poi(Z >= 0)
+      try(lidR::writeLAS(las, paste0(out, "/fileira_", i, format)))
+      
+      if (plot_f) {
+        lidR::plot(las, color = "Classification", size = 0.5, pal = rainbow)
+        if(!is.null(rot_m)) rgl::par3d(userMatrix = rot_m)
+        rgl::par3d(windowRect = c(100, 100, 1200, 1000))
+        rgl::rgl.snapshot(file.path(out, sprintf("fileira_%d.png", i)))
+        rgl::close3d()
+      }
+      setTxtProgressBar(pb, i)
+    }, error = function(e) warning(sprintf("Erro fileira %d: %s", i, e$message)))
+  }
+  close(pb)
+}
+
+# Funções para 3DFin --------------------------------------------------------
+# Função principal para processamento com 3DFin
+processar_3DFin <- function(out, files, params_file, conda_path) {
+  for (file in files) {
+    file_name <- tools::file_path_sans_ext(basename(file))
+    cmd <- sprintf("%s && conda activate 3DFin && 3DFin cli --normalize --export_txt %s %s %s\"", conda_path, file, out, params_file)
+    tryCatch(
+      {
+        system(cmd, wait = TRUE)
+        message("Processado: ", file_name)
+      },
+      error = function(e) warning("Falha em ", file_name, ": ", e$message)
+    )
+  }
+}
+
+processar_resultados_3DFin <- function(out, files) {
+  purrr::map_dfr(files, ~{
+    readLines(.x)[readLines(.x) != ""] |>
+      strsplit("\\s+") |>
+      lapply(\(p) as.numeric(p[1:4])) |>
+      do.call(what = rbind) |>
+      as.data.frame() |>
+      setNames(c("ht", "dap", "X", "Y")) |>
+      dplyr::mutate(dap = dap * 100) |>
+      dplyr::filter(dap != 0)
+  })
+}
+
+# Funções para refinar segmentação -----------------------------------------
+refinar_segmentacao <- function(files, out, out_p, global_id, rot_m, dist, dens_min, ruido, h_min, id_colum, plot_fileira, plot_arvs) {
+  df_g <- data.frame()
+  for(i in seq_along(files)) {
+    try({
+      las <- lidR::readLAS(files[i]); las <- las[las$Classification != 2, ]
+      las <- filter_duplicates(las); las <- las[las$Z >= 0, ]
+      if(id_colum == "tree_id") las <- filter_poi(las, with(las@data, las@data[[id_colum]] != 0))
+      fileira <- sub(".*fileira_(\\d+).*", "\\1", basename(files[i]))
+      coords <- las@data[, .(x_centro = mean(X), y_centro = mean(Y)), by = id_colum]
+      dist_m <- as.matrix(dist(coords[, .(x_centro, y_centro)]))
+      labels <- coords[[id_colum]]; current_label <- min(labels, na.rm = TRUE)
+      for(j in seq_len(nrow(coords))) {
+        if(labels[j] == coords[[id_colum]][j]) { 
+          viz <- which(dist_m[j,] <= dist & labels == coords[[id_colum]])
+          if(length(viz) > 0) labels[viz] <- (current_label <- current_label + 1)
+        }
+      }
+      labels_t <- data.table(id = coords[[id_colum]], tree_label = labels)
+      setnames(labels_t, "id", id_colum)
+      las@data <- merge(las@data, labels_t, by = id_colum, all.x = TRUE)
+      las@data$tree_label <- las@data$tree_label + global_id
+      if(plot_fileira) {
+        plot_las(las, file.path(out_p, paste0("seg_", fileira, ".png")), rot_m, id_colum)
+        plot_las(las, file.path(out_p, paste0("seg_clean_", fileira, ".png")), rot_m, "tree_label")
+      }
+      ids <- unique(las$tree_label)
+      densidade <- npoints(las)/as.numeric(st_area(las))
+      pb_ids <- txtProgressBar(0, length(ids), style = 3)
+      for(k in seq_along(ids)) {
+        id <- ids[k]
+        arv <- las[las$tree_label == id, ]
+        h <- hist(arv$Z, breaks = seq(0, ceiling(max(arv$Z)), 0.5), plot = FALSE)
+        for(g in split(which(h$counts < dens_min * sum(h$counts)), cumsum(c(1, diff(which(h$counts < dens_min * sum(h$counts))) != 1)))) {
+          if(min(g) > 1 && max(g) < length(h$counts) && any(h$counts[1:(min(g)-1)] > 0) && any(h$counts[(max(g)+1):length(h$counts)] > 0)) {
+            arv <- arv[arv$Z < h$breaks[min(g)], ]; break
+          }}
+        if(lidR::npoints(arv)/densidade > ruido && diff(range(arv$Z)) > h_min) {
+          if(plot_arvs) plot_las(arv, paste0(out_p, "/arv_", id, ".png"), rot_m = NULL, "Z")
+          lidR::writeLAS(arv, paste0(out, "/arv_", id, ".laz"))
+          df_g <- rbind(df_g, data.frame(X = mean(arv$X), Y = mean(arv$Y), id = id, fileira = fileira))
+          write.csv2(df_g, paste0(out, "/arv_local.csv"), row.names = F)
+        }
+        setTxtProgressBar(pb_ids, k)
+      }
+      close(pb_ids)
+      global_id <- max(ids)
+    }, silent = F)
+  }
+}
+
+plot_las <- function(las, path, rot_m, color = NULL) {
+  color <- color %||% "TreeID"
+  plot(las, color = color, size = 0.5, bg = "white")
+  if (!is.null(rot_m)) par3d(userMatrix = rot_m)
+  par3d(windowRect = c(100, 100, 1200, 1000))
+  rgl.snapshot(path, fmt = 'png')
+  close3d()
+}
+```
+
+### Processar
+
+```{r}
+# DEFINIR DIRETÓRIO
+dir <- "D:/Estagio/08_Codigo/"
+
+# CONFIGURAR MULTIPROCESSAMENTO
+plan(multisession, workers = (detectCores()-1))
+set_lidr_threads((detectCores()-1))
+
+# CORTAR FILEIRAS
+# Definir diretórios
+out <- file.path(dir, "/03_Processamento/MLS/Fileiras/")
+dir.create(out, recursive = TRUE)
+ctg <- readLAScatalog(file.path(dir, "/02_Pre_processamento/MLS/LAS_norm/"))
+shp <- st_read(file.path(dir, "/shp_teste/fileiras.shp"))
+plot(shp)
+
+# Matriz de rotação para plots (opcional) 
+#rotation_matrix <- par3d("userMatrix")
+rot_m <- matrix(c(0.5087889,  0.86088097, -0.004204961, 0,
+                  -0.1488606,  0.09278676,  0.984495163, 0,
+                   0.8479236, -0.50027436,  0.175360143, 0,
+                   0,          0,           0,           1),
+                  nrow = 4, byrow = TRUE)
+
+# Cortar  fileiras
+cortar_fileiras(ctg, shp, out, format = ".laz", plot_f = T, rot_m)
+
+# 3DFIN - SEGMENTAÇÃO EM INTÂNCIA P1
+## Passo a passo de instalação em "Tutorial_3DFin"
+# Definir diretórios
+inp <- paste0(dir, "/03_Processamento/MLS/Fileiras/")
+pasta <- paste0(dir, "/03_Processamento/MLS/3DFin/")
+out <- paste0(pasta, "/fileiras/")
+dir.create(out, recursive = T)
+params_file <- paste0(dir, "/03_Processamento/3DFinconfig.ini")
+files <- list.files(inp, pattern = "\\.laz$", full.names = TRUE)
+conda <- "C:\\Windows\\System32\\cmd.exe /K \"C:\\ProgramData\\anaconda3\\Scripts\\activate.bat C:\\ProgramData\\anaconda3"
+
+# Processar fileiras
+processar_3DFin(out, files, params_file, conda)
+
+# Compilar resultados (dap, ht, X e Y)
+files <- list.files(out, pattern = "dbh_and_heights.*\\.txt", full.names = TRUE)
+results <- processar_resultados_3DFin(out, files)
+write.csv2(results, paste0(pasta, "/3DFin_results.csv"))
+
+# 3DFIN - SEGMENTAÇÃO EM INSTÂNCIA P2
+# Definir diretórios
+files <- list.files(out, pattern = "tree_ID_dist_axes.*\\.las", full.names = TRUE)
+out <- paste0(dir, "/03_Processamento/arvs_MLS_3DFin/brutas/")
+out_p <- paste0(out, "/plots/")
+dir.create(out, recursive = T); dir.create(out_p)
+
+# Definir parâmetros
+rot_m <- rot_m # Definida acima
+global_id <- 0
+dist <- 1.15 # Distância mínima em metros para considerar uma árv dif de outra
+dens_min <- 0.001 # Proporção mínima de pontos em uma det classe para ser considerada significativa
+ruido <- 2 # Ruído (pts do segmento em relação a densidade de pontos do arquivo) para salvar árvores (padrão: 1.5)
+h_min <- 3.5 # Altura mínima para ser considerado uma árvore
+
+# Executar segmentação de árvores individuais
+refinar_segmentacao(files, out, out_p, global_id, rot_m, dist, dens_min, ruido, h_min, id_colum = "tree_ID", plot_fileira = T, plot_arvs = T)
+```
+
+## Segmentação semântica
+
+### Definir funções
+
+```{r}
+# Função p seg. semantica
+seg_semantica <- function(tls, copa_rel, lim_dist) {
+  tls <- tls[tls$Classification != 2]
+  tls2 <- run_fsct(tls)
+  thin <- tlsSample(tls, smp.voxelize(0.02))
+  map <- treeMap(thin, map.hough(min_density = 0.4), 0)
+  tls <- treePoints(tls, map, trp.crop())
+  tls <- stemPoints(tls, stm.hough())
+  tls@data$label <- tls2@data$label
+  # Filtros
+  max_z <- max(tls$Z) - min(tls$Z) # Altura da nuvem
+  tls2 <- nnFilter(tls, d = 0.05, n = 30)
+  tls3 <- tls[tls$label == 1 & (tls$Z > (1 - copa_rel) * max_z)]
+  criar_ctg(tls2, tls3)
+  tls2 <- readLAS(paste0(out_t, ".las"))
+  # TreeLS2
+  thin <- tlsSample(tls2, smp.voxelize(0.02))
+  map <- treeMap(thin, map.hough(min_density = 0.4), 0)
+  tls2 <- treePoints(tls2, map, trp.crop())
+  tls2 <- stemPoints(tls2, stm.hough())
+  
+  # Stem
+  tls@data$Stem <- NULL
+  tls@data <- tls@data %>%
+    mutate(across(c(X, Y, Z), ~ round(., 4)))
+  tls2@data <- tls2@data %>%
+    mutate(across(c(X, Y, Z), ~ round(., 4)))
+  tls@data <- tls@data %>%
+    left_join(
+      tls2@data %>% select(X, Y, Z, Stem),
+      by = c("X", "Y", "Z")
+    )
+  tls@data$Stem[is.na(tls@data$Stem)] <- FALSE
+  # Filtros
+  tls <- tls[tls$label != 0]
+  tls <- tls[tls$Classification != 2]
+  
+  # Filtrar segmentação
+    # Calcular o centro de cada fuste por ID
+  tls_fuste <- tls[tls$Stem == TRUE,]
+  ids <- unique(tls_fuste$TreeID)
+  centros <- data.frame(TreeID = ids, CentroX = NA, CentroY = NA)
+  for (id in ids) {
+    pontos <- tls_fuste[tls_fuste$TreeID == id,]
+    centros[centros$TreeID == id, "CentroX"] <- mean(pontos$X)
+    centros[centros$TreeID == id, "CentroY"] <- mean(pontos$Y)
+  }
+  
+  # Atribuir os valores centrais com base no TreeID
+  tls@data$CentroX <- ifelse(tls$TreeID %in% centros$TreeID,
+                             centros$CentroX[match(tls$TreeID, centros$TreeID)], NA)
+  tls@data$CentroY <- ifelse(tls$TreeID %in% centros$TreeID,
+                             centros$CentroY[match(tls$TreeID, centros$TreeID)], NA)
+  
+  
+  # Atualizar pontos do fuste com base na distância do centro por TreeID
+  tls@data$dist <- sqrt((tls$X - tls$CentroX)^2 + (tls$Y - tls$CentroY)^2)
+  
+  # Atualizar rótulos com base na altura e distância
+  tls$label <- ifelse(tls$label == 1 & tls$Z < (1 - copa_rel) * max_z, 9, tls$label)
+  
+  # Atualizar pontos do fuste com base na distância do centro e lim_dist
+  tls$Stem <- ifelse(tls$Stem == TRUE & (tls$dist > lim_dist |
+                                                   tls$X < tls$CentroX - lim_dist | 
+                                                   tls$X > tls$CentroX + lim_dist | 
+                                                   tls$Y < tls$CentroY - lim_dist | 
+                                                   tls$Y > tls$CentroY + lim_dist),
+                                                   FALSE, tls$Stem)
+  
+  # Atribuir UserData com base nos rótulos e fuste
+  tls$UserData <- as.integer(ifelse(tls$Stem == TRUE, 1, # Stem
+                               ifelse(tls$label == 9, 9, # Sub-bosque
+                                 ifelse(tls$Stem == FALSE & tls$label == 3, 2, # 2 = galhos
+                                   ifelse(tls$label == 1, 3, 9))))) # 3 = folhas
+  
+  # Retornar o objeto tls processado
+  return(tls)
+}
+
+# Função para executar seg_semântica
+seg_semantica_arvs <- function(files, out, copa_rel, lim_dist, custom_colors, plot_arv_seg, plot_arv_filt, plot_arv_fuste) {
+  setup_env("ForestClassR")
+  out_t <<- paste0(out, "temp/")
+  out_s <<- paste0(out, "seg/")
+  out_f <<- paste0(out, "filtrada/")
+  out_f2 <<- paste0(out, "fuste/")
+  out_p <<- paste0(out, "plots/")
+  dirs <- c(out, out_t, out_s, out_f, out_f2, out_p)
+  sapply(dirs, function(d) if (!dir.exists(d)) dir.create(d, recursive = TRUE))
+  
+  pb <- txtProgressBar(min = 0, max = length(files), style = 3)
+  for(i in seq_along(files)) {
+    tryCatch({
+      las <- readLAS(files[i])
+      id <- as.numeric(sub(".*(\\d+)\\.laz$", "\\1", files[i]))
+      las <- seg_semantica(las, copa_rel, lim_dist)
+      las@data$TreeID <- id
+      arv_f  <- las[las$UserData != 9 & las$UserData != 2]
+      arv_f2 <- las[las$UserData == 1]
+      
+      if(plot_arv_seg) {
+        filename <- paste0(out_p, "arv_seg", id, ".png")
+        plot(las, color = "UserData", pal = custom_colors, size = 0.5)
+        rgl::par3d(windowRect = c(100, 100, 800, 1000))
+        rgl.snapshot(filename, fmt = 'png'); close3d()
+      }
+      if(plot_arv_filt) {
+        filename <- paste0(out_p, "arv_filt", id, ".png")
+        plot(arv_f, color = "Stem", size = 0.5)
+        rgl::par3d(windowRect = c(100, 100, 800, 1000))
+        rgl.snapshot(filename, fmt = 'png'); close3d()
+      }
+      if(plot_arv_fuste) {
+        filename <- paste0(out_p, "arv_fuste", id, ".png")
+        plot(arv_f2, size = 0.5)
+        rgl::par3d(windowRect = c(100, 100, 800, 1000))
+        rgl.snapshot(filename, fmt = 'png'); close3d()
+      }
+      
+      writeLAS(las,  paste0(out_s, "/arv_", id, ".laz"))
+      writeLAS(arv_f, paste0(out_f, "/arv_", id, ".laz"))
+      writeLAS(arv_f2, paste0(out_f2, "/arv_", id, ".laz"))
+      
+      cat("Arquivo", i, "de", length(files), "processado com sucesso.\n")
+    }, error = function(e) {
+      cat("Erro no Arquivo", i, ":", e$message, "\n")
+    })
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+}
+
+# Função para unir las
+criar_ctg <- function(..., temp_dir = tempdir()) {
+  objetos <- list(...)
+  arquivos_temp <- file.path(temp_dir, paste0("temp_", seq_along(objetos), ".las"))
+  for (i in seq_along(objetos)) {
+    writeLAS(objetos[[i]], arquivos_temp[i])
+  }
+  ctg <- readLAScatalog(arquivos_temp)
+  opt_output_files(ctg) <- out_t
+  opt_chunk_size(ctg) <- 10000
+  catalog_retile(ctg)
+}
+```
+
+### Processar
+
+```{r}
+# DEFINIR DIRETÓRIOS
+dir <- "D:/Estagio/08_Codigo/03_Processamento/"
+inp <- paste0(dir, "/arvs_MLS_3DFin/brutas/")
+out <- paste0(dir, "/arvs_MLS_3DFin/")
+
+# DEFINIR PARÂMETROS
+# Parâmetros para segmentação
+copa_rel = 0.65
+lim_dist = 0.5 # metros
+custom_colors <- c("#5C4033", "#a14023","#228B22","gray")
+
+files <- list.files(inp, pattern = "\\.laz$", full.names = TRUE)
+files <- str_sort(files, numeric = TRUE)
+
+# Executar função
+seg_semantica_arvs(files, out, copa_rel, lim_dist, custom_colors, plot_arv_seg = T, plot_arv_filt = T, plot_arv_fuste = T)
+```
+
+## Extração das métricas
+
+### Definir funções
+
+```{r}
+# Função para converter .laz para .las
+conv_laz_para_las <- function(laz_files, las_out) {
+  pb <- txtProgressBar(0, length(laz_files), style = 3)
+  for (i in seq_along(laz_files)) {
+    file <- laz_files[i]
+    id <- tools::file_path_sans_ext(basename(file))
+    las <- readLAS(file)
+    las <- filter_duplicates(las)
+    writeLAS(las, paste0(las_out, id, ".las"))
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+}
+
+# Função para mover las processados (caso dê algum problema no meio do processamento)
+mover_las_proc <- function(results_path, las_files_path, las_out) {
+  proc <- file.path(las_out, "proc")
+  if (!dir.exists(proc)) dir.create(proc, recursive = TRUE)
+  
+  processed_files <- list.files(results_path, pattern = "\\.mat$", full.names = FALSE)
+  processed_ids <- gsub("QSM_arv_([0-9]+)_t1_m1", "arv_\\1", tools::file_path_sans_ext(processed_files))
+  
+  las_to_move <- file.path(las_files_path, paste0(processed_ids, ".las"))
+  dest_files <- file.path(proc, paste0(processed_ids, ".las"))
+  
+  file.copy(las_to_move, dest_files)
+  file.remove(las_to_move)
+}
+
+# TreeQSM ------------------
+# Função para executar o TreeQSM
+executar_treeqsm <- function(pasta_treeqsm, results_path, las_files_path) {
+  # Primeiro comando: inicialização
+  command1 <- paste(
+    "matlab -nodesktop -nosplash -logfile matlab.log -wait -r \"",
+    "try, addpath('", pasta, "'); Inicial, ",
+    "catch ME, disp(getReport(ME)), exit(1), end, exit\"",
+    sep = ""
+  )
+  system(command1)
+  
+  # Segundo comando: execução do TreeQSM
+  command2 <- paste0(
+    "matlab -nodesktop -nosplash -logfile matlab.log -wait -r \"",
+    "try, addpath('", pasta, "'); run_treeqsm('", results_path, "', '", las_files_path, "'); ",
+    "catch ME, disp(getReport(ME)), end, exit\""
+    ) # TreeQSM
+  system(command2)
+}
+
+# Função para compilar resultados do TreeQSM
+compilar_resultados_treeqsm <- function(results_path) {
+  arquivos_txt <- list.files(results_path, pattern = "\\.txt$", full.names = TRUE)
+  lista_dfs <- list()
+  
+  processar_linha <- function(linha, camada_id) {
+    partes <- strsplit(linha, "\t")[[1]]
+    data.frame(
+      variavel = partes[1],
+      valor = as.numeric(partes[2]),
+      camada_id = camada_id,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  for (arquivo in arquivos_txt) {
+    camada_id <- str_extract(basename(arquivo), "\\d+")
+    linhas <- readLines(arquivo)
+    dfs <- lapply(linhas, processar_linha, camada_id)
+    lista_dfs <- c(lista_dfs, dfs)
+  }
+  
+  dados_combinados <- dplyr::bind_rows(lista_dfs)
+  dados_organizados <- dados_combinados %>%
+    tidyr::pivot_wider(names_from = variavel, values_from = valor) %>%
+    dplyr::rename(id = camada_id)
+  
+  write.csv2(dados_organizados, file = file.path(results_path, "TreeQSM.csv"), row.names = FALSE)
+}
+
+# ITSMe + TreeQSM ---------------------
+# Função para processar apenas métricas de nuvem de pontos
+ITSMe_metrics_np <- function(file, pasta, plotar, r2, slice_thickness) {
+  
+  id <- tools::file_path_sans_ext(basename(file))
+  pc <<- read_tree_pc(path = file)
+  XYZ_pos <- tree_position_pc(pc = pc)
+  H <- tree_height_pc(pc = pc)
+
+  # Plot e cálculo de DBH
+  plot_filename <- paste0(pasta, "/plots/", id, ".png")
+  if (plotar) png(filename = plot_filename)
+  out_dbh <- dbh_pc(pc = pc, plot = plotar, thresholdR2 = r2, slice_thickness = slice_thickness)
+  if (plotar) dev.off()
+
+  # Leitura e filtro da nuvem de pontos da copa
+  las_c <- readLAS(file)
+  las_c <- las_c[las_c$UserData == 3]
+  las_c <- las_c@data[, c("X", "Y", "Z")]
+
+  # Área projetada da copa
+  plot_filename2 <- paste0(pasta, "/plots_c_area/", id, ".png")
+  if (plotar) png(filename = plot_filename2)
+  c_area <- projected_area_pc(las_c, plot = plotar)
+  if (plotar) dev.off()
+
+  # Volume da copa
+  plot_filename3 <- paste0(pasta, "/plots_c_vol/", id, ".png")
+  c_vol <- alpha_volume_pc(las_c, plot = plotar)
+  if(plotar) {
+      rgl.snapshot(filename = plot_filename3, fmt = 'png')
+      rgl.close()
+    }
+
+  # Data frame com resultados
+  df <- data.frame(
+    dbh = out_dbh$dbh,
+    fdbh = out_dbh$fdbh,
+    X = XYZ_pos[1],
+    Y = XYZ_pos[2],
+    ht = H$h,
+    crown_area = if(plotar) c_area$pa else c_area,
+    crown_volume = if(plotar) c_vol$av else c_vol,
+    stringsAsFactors = FALSE
+  )
+
+  return(df)
+}
+
+# Função para calcular todas as métricas QSM com informações de nuvem de pontos
+ITSMe_all_qsm_metrics <- function(file_qsm, r2, slice_thickness) {
+  # Ler o QSM
+  qsm <- read_tree_qsm(file_qsm)
+
+  # Inicializar lista de resultados
+  metrics <- list()
+
+  # Métricas baseadas apenas em componentes do QSM
+  metrics$stem_branch_angle <- try(stem_branch_angle_qsm(branch = qsm$branch))
+  metrics$stem_branch_cluster_size <- try(stem_branch_cluster_size_qsm(cylinder = qsm$cylinder))
+  metrics$volume_below_55 <- try(volume_below_55_qsm(cylinder = qsm$cylinder, treedata = qsm$treedata))
+  metrics$cylinder_length_volume_ratio <- try(cylinder_length_volume_ratio_qsm(treedata = qsm$treedata))
+  metrics$shedding_ratio <- try(shedding_ratio_qsm(branch = qsm$branch, treedata = qsm$treedata, cylinder = qsm$cylinder))
+  metrics$branch_angle_ratio <- try(branch_angle_ratio_qsm(branch = qsm$branch))
+  metrics$relative_volume_ratio <- try(relative_volume_ratio_qsm(cylinder = qsm$cylinder, treedata = qsm$treedata))
+  metrics$crown_evenness <- try(crown_evenness_qsm(cylinder = qsm$cylinder))
+  
+  # Métricas que usam a nuvem de pontos (pc)
+  metrics$stem_branch_radius <- try(stem_branch_radius_qsm(
+    cylinder = qsm$cylinder, treedata = qsm$treedata, pc = pc
+  ))
+  metrics$stem_branch_length <- try(stem_branch_length_qsm(
+    branch = qsm$branch, treedata = qsm$treedata, pc = pc
+  ))
+  metrics$stem_branch_distance <- try(stem_branch_distance_qsm(
+    cylinder = qsm$cylinder, treedata = qsm$treedata, pc = pc
+  ))
+  metrics$dbh_height_ratio <- try(dbh_height_ratio_qsm(
+    treedata = qsm$treedata, pc = pc
+  ))
+  metrics$dbh_volume_ratio <- try(dbh_volume_ratio_qsm(
+    treedata = qsm$treedata, pc = pc
+  ))
+  metrics$crown_start_height <- try(crown_start_height_qsm(
+    treedata = qsm$treedata, cylinder = qsm$cylinder, pc = pc
+  ))
+  metrics$crown_height <- try(crown_height_qsm(
+    treedata = qsm$treedata, cylinder = qsm$cylinder, pc = pc
+  ))
+  metrics$crown_diameterheight_ratio <- try(crown_diameterheight_ratio_qsm(
+    treedata = qsm$treedata, cylinder = qsm$cylinder, pc = pc
+  ))
+  metrics$dbh_minradius_ratio <- try(dbh_minradius_ratio_qsm(
+    treedata = qsm$treedata, cylinder = qsm$cylinder, pc = pc, thresholdR2 = r2
+  ))
+
+  # Converter para data.frame
+  metrics_df <- as.data.frame(t(unlist(metrics)))
+
+  return(metrics_df)
+}
+
+# Função geral para calcular métricas ITSMe + TreeQSM
+ITSMe_all_metrics <- function(files, files_qsm, pasta, plotar, r2, slice_thickness) {
+  results_list <- list()
+  pb <- txtProgressBar(0, length(files), style = 3)
+  
+  for (i in seq_along(files)) {
+    tryCatch({
+      file <- files[i]
+      id <- str_extract(basename(file), "\\d+")
+      tree_number <- gsub("arv_", "", id)
+      file_qsm <- files_qsm[grep(paste0("QSM_arv_", tree_number, "_"), files_qsm)]
+
+      cloud_metrics <- ITSMe_metrics_np(file, pasta, plotar, r2, slice_thickness)
+
+      if (length(file_qsm) == 0) {
+        results_list[[id]] <- list(cloud_metrics = cloud_metrics)
+        combined_df <- do.call(rbind, lapply(names(results_list), function(id) {
+          data.frame(id = id, cloud = results_list[[id]]$cloud_metrics)
+        }))
+        write.csv2(combined_df, file.path(pasta, "ITSMe+TreeQSM.csv"))
+        next
+      }
+
+      qsm_metrics <- ITSMe_all_qsm_metrics(file_qsm, r2, slice_thickness)
+      results_list[[id]] <- list(cloud_metrics = cloud_metrics, qsm_metrics = qsm_metrics)
+
+      combined_df <- dplyr::bind_rows(lapply(names(results_list), function(id) {
+        cloud <- results_list[[id]]$cloud_metrics
+        qsm <- results_list[[id]]$qsm_metrics %||%
+               data.frame(matrix(NA, nrow = 1, ncol = ncol(cloud)))
+        dplyr::bind_cols(
+          data.frame(id = id, stringsAsFactors = FALSE),
+          dplyr::rename_with(cloud, ~ paste0("cloud_", .x)),
+          dplyr::rename_with(qsm, ~ paste0("qsm_", .x))
+        )
+      }))
+
+      combined_df <- combined_df[, colSums(!is.na(combined_df)) > 0]
+      write.csv2(combined_df, file.path(pasta, "ITSMe+TreeQSM.csv"), row.names = FALSE)
+    }, error = function(e) {
+      warning(paste("Ignorando erro na árvore", file, ":", e$message))
+    })
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+}
+
+# AdTree -------------------
+# Função para converter .las para .xyz
+conv_las_para_xyz <- function(files, out_xyz) {
+  for (file in files) {
+    id <- tools::file_path_sans_ext(basename(file))
+    las <- readLAS(file)
+    las <- filter_duplicates(las)
+    write.table(
+      las@data[, .(X, Y, Z)],
+      file = paste0(out_xyz, id, ".xyz"),
+      col.names = F,
+      row.names = F,
+      sep = " ")
+  }
+}
+
+# Função para executar o AdTree
+executar_adtree <- function(caminho_adtree, inp, out, skeleton) {
+  caminho_adtree <- normalizePath(caminho_adtree, winslash = "/", mustWork = TRUE)
+  inp <- normalizePath(inp, winslash = "/", mustWork = TRUE)
+  out <- normalizePath(out, winslash = "/", mustWork = TRUE)
+  sufixo <- if (skeleton) "-s" else ""
+  comando <- sprintf('"%s" "%s" "%s" %s', caminho_adtree, inp, out, sufixo)
+  system(comando, intern = F, wait = T, show.output.on.console = T)
+}
+
+# Função calcular métricas do QSM do AdTree com o lidUrb
+AdTree_metrics <- function(files, out) {
+  results_list <- list()
+  pb <- txtProgressBar(0, length(files), style = 3)
+
+  for (i in seq_along(files)) {
+    tryCatch({
+      file <- files[i]
+      mesh <- Morpho::obj2mesh(file)
+      qsm <- lidUrb::adtree2qsm(mesh)
+      df <- qsm$QSM
+      qsm <- qsm_topology(qsm)
+
+      # Raios em diferentes alturas
+      percentuais <- c(1, 2, 3, 4, 5, 10, 15, 25, 35, 45, 50, 55, 65, 75, 85, 95)
+      altura_max <- max(df$endZ, na.rm = TRUE)
+      get_max_radius_near_height <- function(altura_alvo, margem = 0.1) {
+        subset <- df[df$startZ >= (altura_alvo - margem) & df$startZ <= (altura_alvo + margem), ]
+        if (nrow(subset) == 0) return(NA)
+        max(subset$radius_cyl, na.rm = TRUE)
+      }
+      radius_vec <- unlist(lapply(percentuais, function(pct) {
+        alt <- (pct / 100) * altura_max
+        setNames(200 * get_max_radius_near_height(alt), paste0("h_", pct, "_d"))
+      }))
+
+      # Métricas estruturais
+      branch_vec <- unlist(lapply(seq_len(nrow(qsm$Branching_order_metrics)), function(i) {
+        bo <- qsm$Branching_order_metrics$branching_order[i]
+        c(setNames(qsm$Branching_order_metrics$total_length[i], paste0("Branching_order_", bo, "_length")),
+          setNames(qsm$Branching_order_metrics$total_volume[i], paste0("Branching_order_", bo, "_volume")))
+      }))
+      diam_vec <- unlist(lapply(seq_len(nrow(qsm$Diameter_class_metrics)), function(i) {
+        dc <- qsm$Diameter_class_metrics$diameter_class[i]
+        c(setNames(qsm$Diameter_class_metrics$total_length[i], paste0("Diameter_class_", dc, "_length")),
+          setNames(qsm$Diameter_class_metrics$total_volume[i], paste0("Diameter_class_", dc, "_volume")))
+      }))
+      df_axes <- qsm$Axes_metrics[qsm$Axes_metrics$axis_ID %in% 1:10, ]
+      axes_vec <- unlist(lapply(seq_len(nrow(df_axes)), function(i) {
+        ax <- df_axes$axis_ID[i]
+        c(setNames(df_axes$total_length[i], paste0("Axes_", ax, "_length")),
+          setNames(df_axes$total_volume[i], paste0("Axes_", ax, "_volume")))
+      }))
+
+      # Consolidar tudo
+      all_metrics <- c(radius_vec, branch_vec, diam_vec, axes_vec)
+      df_all_metrics <- as.data.frame(t(all_metrics), stringsAsFactors = FALSE)
+
+      id <- str_extract(basename(file), "\\d+")
+      df_main <- data.frame(
+        id = id,
+        dap = 100 * qsm$DBH,
+        volume_total = qsm$Volume,
+        length = qsm$Length,
+        stringsAsFactors = FALSE
+      )
+
+      df_row <- cbind(df_main, df_all_metrics)
+      results_list[[length(results_list) + 1]] <- df_row
+
+      # Atualizar resultados parciais
+      results <- dplyr::bind_rows(results_list)
+      write.csv2(results, file.path(out, "AdTree.csv"), row.names = FALSE)
+    }, error = function(e) {
+      cat("Erro ao processar:", file, "\nMensagem de erro:", e$message, "\n")
+    })
+    setTxtProgressBar(pb, i)
+  }
+  close(pb)
+}
+
+# MÉTRICAS DE COPA
+# Função secundária lidR
+fd = function(X,Y,Z) {
+  M = cbind(X,Y,Z)
+  est.boxcount(M)$estdim
+}
+
+# Função principal para definir métricas de copa
+metricas_copa <- function(files, out, plotar) {
+  library(rLiDAR)
+  pb <- txtProgressBar(0, length(files), style = 3)
+  crown_metrics_df <- data.frame()
+  pasta_p_a <- paste0(out, "/plots_c_area/"); pasta_p_v <- paste0(out, "/plots_c_vol/")
+  if (plotar) {dir.create(pasta_p_a); dir.create(pasta_p_v)}
+  try(for (x in seq_along(files)) {
+    file <- files[x]
+    id <- str_extract(basename(file), "\\d+")
+    seg <- lidR::readLAS(file)
+    seg@data$treeID <- id
+    seg@data$treeID <- as.integer(seg@data$treeID)
+    
+    # rLiDAr
+    xyziId <- seg@data[, .(X, Y, Z, Intensity, treeID)]
+    rLiDAR <- CrownMetrics(xyziId)
+    rLiDAR <- as.data.table(lapply(rLiDAR, unlist))
+    
+    # lidR
+    crown <- crown_metrics(seg, func = .stdtreemetrics, geom = "concave")
+    crown2 <- crown_metrics(seg, func = .stdmetrics)
+    crown3 <- crown_metrics(seg, func = ~as.list(lmom::samlmu(Z)))
+    crown2 <- st_drop_geometry(crown2)
+    crown3 <- st_drop_geometry(crown3)
+    crown <- crown %>%
+      left_join(crown2, by = "treeID") %>%
+      left_join(crown3, by = "treeID")
+    
+    # FILTRAR ÁRV., CLIPAR COPA E CALCULAR MÉTRICAS BÁSICAS
+    ht <- max(seg$Z) - min(seg$Z)
+    seg <- filter_poi(seg, seg$UserData == 3)
+    hc <- max(seg$Z) - min(seg$Z)
+    cc <- as.data.frame(seg@data[, c("X", "Y")])
+    cc <- cc[abs(scale(cc$X)) < 2 & abs(scale(cc$Y)) < 2, ]
+    cc <- cc[chull(cc$X, cc$Y), ]
+    matriz_dist <- as.matrix(dist(cc))
+    dap_max_c <- max(matriz_dist)
+    cc <- cc[chull(cc$X, cc$Y), ]
+    d <- as.matrix(dist(cc))
+    i <- which(d == max(d), arr.ind = TRUE)[1, ]
+    a <- cc[i[1], ]; b <- cc[i[2], ]
+    ang <- atan2(b$Y - a$Y, b$X - a$X) + pi/2
+    proj <- with(cc, (X - a$X) * cos(ang) + (Y - a$Y) * sin(ang))
+    j <- c(which.min(proj), which.max(proj))
+    dap_perp_c <- sqrt(sum((cc[j[1], ] - cc[j[2], ])^2))
+    cc <- rbind(cc, cc[1, ])
+    dist_p <- sqrt(diff(cc$X)^2 + diff(cc$Y)^2)
+    perimetro <- sum(dist_p)
+    
+    # MÉTRICAS lidUrb
+    seg@data$wood <- 0
+    gc_lidUrb <- if (lidR::npoints(seg) > 200) green_crown_volume(seg, npts_in_clust = 200) else list(Green_crown_area = NA, Green_crow_volume = NA, mesh = NULL)
+    if (plotar) {
+      plot_filename <- paste0(pasta_p_v,"lidUrb_", id, ".png")
+      shade3d(gc_lidUrb$mesh,col = "chartreuse4")
+      rgl.snapshot(filename = plot_filename, fmt = "png")
+      close3d()}
+    seg <- seg@data[, c("X", "Y", "Z")]
+    lt_lidUrb <- leaves_traits(seg, layer_thickness = 0.2)
+    
+    # Seleciona os dados e define a altura máxima
+    dados <- lt_lidUrb$LAD_profile
+    names(dados) <- c("altura","LAD")
+    altura_max <- max(dados$altura)
+    
+    # Cria os intervalos com 11 pontos (0% a 100% em 10 etapas)
+    breaks <- seq(0, altura_max, length.out = 11)
+    
+    # Calcula o LAD médio para cada um dos 10 intervalos
+    LAD_medio <- sapply(1:10, function(i) {
+      # Para os intervalos de 1 a 9 usa "<" e para o último utiliza "<=" para incluir a altura máxima
+      cond <- if (i < 10) {
+        dados$altura >= breaks[i] & dados$altura < breaks[i + 1]
+      } else {
+        dados$altura >= breaks[i] & dados$altura <= breaks[i + 1]
+      }
+      mean(dados$LAD[cond], na.rm = TRUE)
+    })
+    
+    # Cria o data frame de saída com os intervalos percentuais (10% a 100%) e os respectivos valores calculados
+    LAD_rel <- data.frame(altura_rel = seq(10, 100, by = 10), LAD_medio = LAD_medio)
+    
+    # MÉTRICAS ITSMe
+    # Gera o plot da crown area, se solicitado
+    plot_filename <- paste0(pasta_p_a,"ITSMe_", id, ".png")
+    if (plotar) {png(filename = plot_filename)}
+    c_area <- projected_area_pc(seg, plot = plotar)
+    if (plotar) {dev.off()}
+    
+    # Gera o plot do crown volume, se solicitado
+    plot_filename <- paste0(pasta_p_v,"ITSMe_", id, ".png")
+    c_vol <- alpha_volume_pc(seg, plot = plotar)
+    if (plotar) {rgl.snapshot(filename = plot_filename, fmt = "png")
+                 close3d()}
+    
+    # Cria um data frame com as métricas de copa
+    df <- data.frame(id = id,
+                     hc = hc,
+                     perimetro = perimetro,
+                     dap_maior_c = dap_max_c,
+                     dap_perp_c = dap_perp_c,
+                     LAI_1 = lt_lidUrb$LAI,
+                     TLA_1 = lt_lidUrb$TLA,
+                     c_area_1 = gc_lidUrb$Green_crown_area,
+                     c_volume_1 = gc_lidUrb$Green_crow_volume,
+                     c_area_2 = if (plotar) c_area$pa else c_area,
+                     c_volume_2 = if (plotar) c_vol$av else c_vol,
+                     stringsAsFactors = FALSE)
+    
+    # Acumula os resultados
+    df_lad <- as.data.frame(t(LAD_rel$LAD_medio))
+    names(df_lad) <- paste0("LAD_", seq(10, 100, by = 10), "_1")
+    df <- cbind(df, df_lad)
+    names(rLiDAR) <- paste0(names(rLiDAR), "_3")
+    df <- cbind(df, rLiDAR)
+    names(crown) <- paste0(names(crown), "_4")
+    df <- cbind(df, crown)
+    crown_metrics_df <- rbind(crown_metrics_df, df)
+    col_remover <- c("Tree_3", "TotalReturns_3", "HMAX_3", "HMEAN_3", 
+                          "HSD_3", "HKUR_3", "HSKE_3", "H05TH_3", "H10TH_3", 
+                          "H15TH_3", "H20TH_3", "H25TH_3", "H30TH_3", "H35TH_3", 
+                          "H40TH_3", "H45TH_3", "H50TH_3", "H55TH_3", "H60TH_3", 
+                          "H65TH_3", "H70TH_3", "H75TH_3", "H80TH_3", "H90TH_3", 
+                          "H95TH_3", "IMAX_3", "IMIN_3", "IMEAN_3", 
+                          "IMEDIAN_3", "IMODE_3", "IVAR_3", "ISD_3",
+                          "IKUR_3", "treeID_4", "Z_4", "n_4")
+    dff <- crown_metrics_df[, !(names(crown_metrics_df) %in% col_remover)]
+    shp <- st_as_sf(dff, sf_column_name = "geometry_4")
+    write.csv2(dff[, names(dff) != "geometry_4"],
+           file = paste0(out, "/Metricas_copa.csv"), row.names = F)
+    invisible(sf::st_write(shp, paste0(out, "/Metricas_copa.gpkg"), append = F, quiet = T))
+
+    setTxtProgressBar(pb, x)
+  })
+  close(pb)
+}
+
+# MÉTRICAS PRÓPRIAS ----------
+# Função para calcular densidades acumuladas
+calcular_densidades <- function(las, galhos, base, altura_total) {
+  alturas <- base + altura_total * seq(0, 1, by = 0.1)
+  cumsum(sapply(1:10, function(i) {
+    npoints(galhos[galhos$Z >= alturas[i] & galhos$Z < alturas[i+1]])/npoints(las)
+  }))
+}
+
+# Função para calcular centroides e ângulos
+calc_cent_ang <- function(fuste, base, ht, n_fatias) {
+  frac <- seq(0, 1, length.out = n_fatias)^1.5
+  alturas_corte <- base + frac * ht
+  if (length(alturas_corte) < 2) stop("O vetor 'alturas_corte' deve ter pelo menos dois valores.")
+  n <- length(alturas_corte) - 1
+  centroides <- vector("list", n)
+  
+  # Calcula os centroides para cada fatia
+  for (i in seq_len(n)) {
+    fatia <- subset(fuste, fuste$Z >= alturas_corte[i] & fuste$Z < alturas_corte[i + 1])
+    centroideX <- mean(fatia$X, na.rm = TRUE)
+    centroideY <- mean(fatia$Y, na.rm = TRUE)
+    centroideZ <- mean(c(alturas_corte[i], alturas_corte[i + 1]), na.rm = TRUE)
+    
+    centroides[[i]] <- data.frame(
+      Fatia = i,
+      Z_min = alturas_corte[i],
+      Z_max = alturas_corte[i + 1],
+      X_centroide = centroideX,
+      Y_centroide = centroideY,
+      Z_centroide = centroideZ
+    )
+  }
+  
+  centroides_df <- do.call(rbind, centroides)
+  centroides_df$angulo_graus <- 0
+  
+  # Calcula o ângulo entre centroides consecutivos
+  try(for (i in 1:(nrow(centroides_df) - 1)) {
+    v1 <- c(
+      centroides_df$X_centroide[i + 1] - centroides_df$X_centroide[i],
+      centroides_df$Y_centroide[i + 1] - centroides_df$Y_centroide[i],
+      centroides_df$Z_centroide[i + 1] - centroides_df$Z_centroide[i]
+    )
+    
+    if (i < (nrow(centroides_df) - 1)) {
+      v2 <- c(
+        centroides_df$X_centroide[i + 2] - centroides_df$X_centroide[i + 1],
+        centroides_df$Y_centroide[i + 2] - centroides_df$Y_centroide[i + 1],
+        centroides_df$Z_centroide[i + 2] - centroides_df$Z_centroide[i + 1]
+      )
+    } else {
+      v2 <- c(0, 0, 0)
+    }
+    
+    if (any(is.na(v1)) || any(is.na(v2))) {
+      centroides_df$angulo_graus[i] <- NA
+    } else {
+      norm1 <- sqrt(sum(v1^2))
+      norm2 <- sqrt(sum(v2^2))
+      if (norm1 > 0 && norm2 > 0) {
+        cos_theta <- sum(v1 * v2) / (norm1 * norm2)
+        cos_theta <- max(min(cos_theta, 1), -1)
+        centroides_df$angulo_graus[i] <- acos(cos_theta) * (180 / pi)
+      } else {
+        centroides_df$angulo_graus[i] <- NA
+      }
+    }
+  })
+  
+  # Define ângulo 0 para o último ponto
+  centroides_df$angulo_graus[nrow(centroides_df)] <- NA
+  
+  return(centroides_df)
+}
+
+# Teste de significância dos ângulos
+avaliar_significancia <- function(angulos) {
+  angulos <- centroides_df$angulo_graus
+  angulos <- na.omit(angulos)
+  if (length(angulos) < 2) return(list(media = 0, significativo = FALSE))
+  media <- mean(angulos, trim = 0.4)
+  max_val <- unname(quantile(angulos, probs = 0.8, na.rm = TRUE))
+  teste <- t.test(angulos, mu = 0, alternative = "greater")
+  list(media = media, sd = sd(angulos), max_val = max_val, p.value = teste$p.value, significativo = teste$p.value < 0.05)
+}
+
+# Função para classificar a árvore
+classificar_arvore <- function(resultado_teste) {
+  media <- resultado_teste$media
+  sd <- resultado_teste$sd
+  max_val <- resultado_teste$max_val
+  
+  if (any(is.na(c(media, sd, max_val)))) return("indefinido")
+  if (!resultado_teste$significativo) return("reta")
+  if (media > 5 && sd < 3) return("inclinada")
+  if (media < 0.8 || (media < 1.2 && sd < 2 && max_val < 3)) return("reta")
+  if ((media < 2 && max_val < 3)) return("quase reta")
+  if (media < 2 && sd < 2.5 && max_val < 4) return("quase reta")
+  if (media < 4 && sd < 3) return("levemente torta")
+  if (media < 6) return(ifelse(sd < 3.5, "torta", "torta irregular"))
+  if (media < 8) return(ifelse(sd < 4, "muito torta", "muito torta irregular"))
+  if (sd > 5) return("sinuosa")
+  return("altamente irregular")
+}
+
+# Função para calcular métricas de qualidade do fuste e densidade de galhos
+metricas_fuste_galhos <- function(files, out, n_fatias) {
+  resultados <- data.frame()
+  pb <- txtProgressBar(0, length(files), style = 3)
+
+  for (i in seq_along(files)) {
+    tryCatch({
+      file <- files[i]
+      las <- lidR::readLAS(file)
+      fuste <- las[las$UserData == 1]
+      galhos <- las[las$UserData == 2]
+
+      base <- min(las$Z)
+      ht <- max(las$Z) - base
+
+      dens_acum <- calcular_densidades(las, galhos, base, ht)
+      centroides_df <- calc_cent_ang(fuste, base, ht, n_fatias)
+      resultado_teste <- avaliar_significancia(centroides_df$angulo_graus)
+      suppressWarnings({classificacao <- classificar_arvore(resultado_teste)})
+
+      resultado_individual <- data.frame(
+        id = str_extract(basename(file), "\\d+"),
+        as.list(setNames(dens_acum, paste0("d_", seq(10, 100, by = 10)))),
+        angulo_medio = resultado_teste$media,
+        sd_angulos = resultado_teste$sd,
+        classificacao = classificacao
+      )
+
+      for (j in seq_len(nrow(centroides_df))) {
+        resultado_individual[paste0("angulo_", j)] <- centroides_df$angulo_graus[j]
+      }
+
+      resultados <- rbind(resultados, resultado_individual)
+      write.csv2(resultados, paste0(out, "/Metricas_fuste_galhos.csv"), row.names = F)
+    }, error = function(e) {
+      message("Erro no arquivo: ", file, "\n→ ", e$message)
+    })
+    setTxtProgressBar(pb, i)
+  }
+
+  close(pb)
+}
+```
+
+### Processar TreeQSM
+
+Primeiramente siga os passos do Tutorial de Instalação TreeQSM
+
+```{r}
+# DEFINIR DIRETÓRIOS
+dir <- "D:/Estagio/08_Codigo/"
+pasta_treeqsm <- paste0(dir, "/03_Processamento/TreeQSM/") # Pasta onde estão os arquivos do TreeQSM -> definir também em TreeQSM/Inicial.m
+Sys.setenv(MATLAB="C:/Program Files/MATLAB/R2025a/bin") # Pasta onde está instalado o Matlab
+
+# Defina os caminhos para resultsPath e lasFilesPath
+results_path <- paste0(dir, "/03_Processamento/MLS/TreeQSM/") # Caminho para salvar os resultados
+dir.create(results_path, recursive = TRUE)
+las_files_path <- paste0(dir, "/03_Processamento/MLS/arvs_MLS_3DFin/filtrada_las/") # Caminho onde estão as árvores individuais .las
+
+  ## Caso as árvores individuais estejam em formato .laz execute:
+  las_files_path <- paste0(dir, "/03_Processamento/MLS/arvs_MLS_3DFin/filtrada/") # Caminho onde estão as árvores individuais .laz
+  laz_files <- list.files(las_files_path, pattern = "\\.laz$", full.names = T)
+  las_out <- paste0(dir, "/03_Processamento/MLS/arvs_MLS_3DFin/filtrada_las/"); dir.create(las_out, recursive = T)
+  ## Converter .laz para .las
+  conv_laz_para_las(laz_files, las_out)
+  las_files_path <- las_out
+
+# EXECUTAR
+executar_treeqsm(pasta_treeqsm, results_path, las_files_path)
+compilar_resultados_treeqsm(results_path)
+```
+
+### Processar ITSMe + TreeQSM
+
+```{r}
+# DEFINIR DIRETÓRIOS
+dir <- "D:/Estagio/08_Codigo/"
+out <- paste0(dir, "/03_Processamento/MLS/ITSMe/"); dir.create(out, recursive = TRUE)
+
+# Diretório contendo as nuvem de pontos de árvores individuais
+inp_las <- paste0(dir, "/03_Processamento/MLS/arvs_MLS_3DFin/filtrada_las/")
+inp_qsm <- paste0(dir,"/03_Processamento/MLS/TreeQSM/")
+
+# EXECUTAR
+## Files a serem processados
+files <- list.files(path = inp_las, pattern = "\\.las$", full.names = TRUE); files <- sort(files)
+files_qsm <- list.files(path = inp_qsm, pattern = "\\.mat$", full.names = TRUE); files_qsm <- sort(files_qsm)
+
+## Definir parâmetros
+r2 <- 0.01 # Padrão = 0.001 (maior para arvs menores ou registro ruim)
+slice_thickness <- 0.1 # Padrão = 0.06 (maior para menor densidade de pontos)
+
+## Executar função
+ITSMe_all_metrics(files, files_qsm, out, plotar = F, r2, slice_thickness)
+```
+
+### Processar AdTree
+
+Primeiramente siga os passos do Tutorial de Instalação AdTree
+
+```{r}
+# DEFINIR DIRETÓRIOS P1
+dir <- "D:/Estagio/08_Codigo/"
+out <- paste0(dir, "/03_Processamento/MLS/AdTree/results"); dir.create(out, recursive = TRUE)
+inp_las <- paste0(dir, "/03_Processamento/MLS/arvs_MLS_3DFin/filtrada_las/")
+out_xyz <- paste0(dir, "/03_Processamento/MLS/arvs_MLS_3DFin/filtrada_xyz/") # Pasta onde serão salvas árvores no formato .xyz para rodar no AdTree
+dir.create(out_xyz, recursive = TRUE)
+
+# EXECUTAR AdTree
+## Converter .las para .xyz
+files <- list.files(path = inp_las, pattern = "\\.las$", full.names = TRUE); files <- sort(files)
+conv_las_para_xyz(files, out_xyz)
+
+## Executar
+caminho_adtree <- "D:/Estagio/08_Codigo/03_Processamento/AdTree/bin/AdTree.exe"
+inp <- out_xyz
+executar_adtree(caminho_adtree, inp, out, skeleton = F)
+
+# DEFINIR DIRETÓRIO P2
+inp <- out # Caminho onde estão os mesh gerados pelo AdTree
+out <- paste0(dir, "/03_Processamento/MLS/AdTree/")
+  
+# EXECUTAR P2
+## Files a serem processados
+files <- list.files(path = inp, pattern = "branches.*\\.obj$", full.names = T)
+
+## Calcular metricas
+AdTree_metrics(files, out)
+```
+
+### Processar métricas de copa: lidUrb, lidR e rLiDAR
+
+```{r}
+# DEFINIR DIRETÓRIOS
+dir <- "D:/Estagio/08_Codigo/"
+inp <- paste0(dir, "/03_Processamento/MLS/arvs_MLS_3DFin/filtrada/")
+out <- paste0(dir, "/03_Processamento/MLS/Metricas_copa/"); dir.create(out)
+
+# EXECUTAR
+## Files a serem processados
+files <- sort(list.files(path = inp, pattern = "\\.laz$", full.names = T))
+
+## Calcular métricas
+metricas_copa(files, out, plotar = F)
+```
+
+### Processar métricas de qualidade do fuste e densidade de galhos
+
+```{r}
+# DEFINIR DIRETÓRIOS
+dir <- "D:/Estagio/08_Codigo/"
+inp <- paste0(dir, "/03_Processamento/MLS/arvs_MLS_3DFin/seg/")
+out <- paste0(dir, "/03_Processamento/MLS/Metricas_fuste_galhos/"); dir.create(out)
+
+# EXECUTAR
+## Files a serem processados
+files <- sort(list.files(path = inp, pattern = "\\.laz$", full.names = T))
+
+## Calcular métricas
+metricas_fuste_galhos(files, out, n_fatias = 12)
+```
+
+## Compilar métricas em um único dataset e geodataset
+
+```{r}
+# DEFINIR DIRETÓRIOS
+dir <- "D:/Estagio/08_Codigo/"
+pasta <- paste0(dir, "/03_Processamento/MLS/")
+out <- paste0(dir, "/04_Bases/MLS/"); dir.create(out, recursive = TRUE)
+
+# ABRIR DATASETS
+TreeQSM <- read.csv2(paste0(pasta, "/TreeQSM/TreeQSM.csv"))
+ITSMe_TreeQSM <- read.csv2(paste0(pasta, "/ITSMe/ITSMe+TreeQSM.csv"))
+AdTree <- read.csv2(paste0(pasta, "/AdTree/AdTree.csv"))
+Copa <- read.csv2(paste0(pasta, "/Metricas_copa/Metricas_copa.csv"))
+Fuste_galhos <- read.csv2(paste0(pasta, "/Metricas_fuste_galhos/Metricas_fuste_galhos.csv"))
+local_arvs <- read.csv2(paste0(pasta, "/arvs_MLS_3DFin/arv_local.csv"))
+
+# CRIAR GEODATASET
+sf <- st_as_sf(local_arvs, coords = c("X", "Y"))
+
+# UNIR DATASETS COM GEODATASETS
+sf <- sf %>%
+  mutate(id = as.character(id)) %>%
+  left_join(TreeQSM %>% mutate(id = as.character(id)), by = "id") %>%
+  left_join(ITSMe_TreeQSM %>% mutate(id = as.character(id)), by = "id") %>%
+  left_join(AdTree %>% mutate(id = as.character(id)), by = "id") %>%
+  left_join(Copa %>% mutate(id = as.character(id)), by = "id") %>%
+  left_join(Fuste_galhos %>% mutate(id = as.character(id)), by = "id")
+
+plot(sf)
+
+# SALVAR
+## Atribuir crs com base em crs da nuvem de pontos
+ctg <- readLAScatalog(paste0(dir, "/dados/MLS/"))
+st_crs(sf) <- st_crs(ctg)
+
+## Salvar
+st_write(sf, paste0(out, "/Metricas_MLS_points.gpkg"), append = F)
+df <- st_drop_geometry(sf); write.csv2(df, paste0(out, "/Metricas_MLS.csv"), row.names = F)
+```
+
+### Fazer interseção com parcelas experimentais (opcional)
+
+```{r}
+# ABRIR GEODATASETS
+sf <- paste0(out, "/Metricas_MLS_points.gpkg")
+sf_p <- st_read(paste0(dir, "/dados/Parcelas.gpkg"))
+
+# AJUSTAR GEODATASETS
+## Nomes
+names(sf_p)
+names(sf_p) <- c("parcela", "geom")
+
+## Unir com dados de inventário (opcional)
+#inv <- read.csv2(paste0(dir, "/dados/Inventario.csv"))
+#inv <- left_join(inv, sf_p, by = "parcela")
+#sf_p <- st_as_sf(inv, sf_column_name = "geom", crs = st_crs(sf_p))
+
+# INTERSEÇÃO
+sf_p2 <- st_intersection(sf_p, sf)
+plot(sf_p2)
+
+# SALVAR
+st_write(sf_p2, paste0(out, "/Metricas_MLS_parcelas.gpkg"), append = F)
+```
