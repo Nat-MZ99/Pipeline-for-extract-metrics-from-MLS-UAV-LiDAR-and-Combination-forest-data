@@ -5,7 +5,7 @@
 ### Instalar pacotes necessários
 
 ```{r}
-install.packages("FORTLS")
+install.packages("parallel")
 install.packages("lidR")
 install.packages("raster")
 install.packages("sf")
@@ -235,9 +235,9 @@ ctg <- readLAScatalog(paste0(nuvem))
 # Criar tiles
 opt_output_files(ctg) <- paste0(tiles, "/tile_{XLEFT}_{YBOTTOM}")
 opt_chunk_buffer(ctg) <- 0
-opt_chunk_size(ctg) <- 10 # retile to 250 m
+opt_chunk_size(ctg) <- 10 # tamanho do tile
 plot(ctg, chunk = TRUE)
-ctg <- catalog_retile(ctg) # apply retile
+ctg <- catalog_retile(ctg) # aplicar retile
 
 # Checar las
 las_check(ctg)
@@ -996,7 +996,7 @@ fd = function(X,Y,Z) {
   est.boxcount(M)$estdim
 }
 
-# Função principal para definir métricas de copa
+# Função principal para extrair métricas de copa
 metricas_copa <- function(files, out, plotar) {
   library(rLiDAR)
   pb <- txtProgressBar(0, length(files), style = 3)
@@ -1370,7 +1370,7 @@ files <- list.files(path = inp, pattern = "branches.*\\.obj$", full.names = T)
 AdTree_metrics(files, out)
 ```
 
-### Processar métricas de copa: lidUrb, lidR e rLiDAR
+### Processar métricas de copa: lidUrb, lidR, rLiDAR e ITSMe
 
 ```{r}
 # DEFINIR DIRETÓRIOS
@@ -1446,7 +1446,7 @@ df <- st_drop_geometry(sf); write.csv2(df, paste0(out, "/Metricas_MLS.csv"), row
 
 ```{r}
 # ABRIR GEODATASETS
-sf <- paste0(out, "/Metricas_MLS_points.gpkg")
+sf <- st_read(paste0(out, "/Metricas_MLS_points.gpkg"))
 sf_p <- st_read(paste0(dir, "/dados/Parcelas.gpkg"))
 
 # AJUSTAR GEODATASETS
@@ -1460,6 +1460,8 @@ names(sf_p) <- c("parcela", "geom")
 #sf_p <- st_as_sf(inv, sf_column_name = "geom", crs = st_crs(sf_p))
 
 # INTERSEÇÃO
+sf <- st_transform(sf, st_crs(sf_p))
+st_crs(sf) <- st_crs(sf_p)
 sf_p2 <- st_intersection(sf_p, sf)
 plot(sf_p2)
 
