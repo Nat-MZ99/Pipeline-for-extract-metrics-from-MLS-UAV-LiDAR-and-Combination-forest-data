@@ -3,6 +3,10 @@ Código relativo a metodologia desenvolvida no Trabalho de Conclusão de Curso e
 
 **Conjunto de dados para teste**: https://drive.google.com/drive/folders/1Vufd0jYseJBuL0fNt3iprlHt1-q8WreN?usp=sharing
 
+
+
+
+
 ### Referências
 **3DFin**: https://github.com/3DFin
 
