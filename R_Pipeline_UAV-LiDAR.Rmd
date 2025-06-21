@@ -1,0 +1,573 @@
+# Processamento de nuvens UAV-LiDAR florestais a nível de árvore - DTM, DSM, CHM, Segmentação em instância e semântica + extração de \~100 métricas
+
+## Pacotes
+
+### Instalar pacotes necessários
+
+```{r}
+install.packages("lidR")
+install.packages("parallel")
+install.packages("raster")
+install.packages("sf")
+install.packages("future")
+install.packages("rlang")
+install.packages("dplyr")
+install.packages("devtools")
+install.packages("reticulate")
+library(reticulate)
+reticulate::py_install("jakteristics", pip=TRUE)
+library(devtools)
+install.packages('lasR', repos = 'https://r-lidar.r-universe.dev')
+devtools::install_github("lmterryn/ITSMe", build_vignettes = TRUE)
+remotes::install_version("rgeos", version = "0.6-4")
+devtools::install_github("carlos-alberto-silva/rLiDAR", build_vignettes = TRUE)
+devtools::install_github("Blecigne/lidUrb")
+```
+
+### Carregar pacotes necessários
+
+```{r include=FALSE}
+library(parallel)
+library(lasR)
+library(rgl)
+library(lidR)
+library(raster)
+library(sf)
+library(future)
+library(rlang)
+library(dplyr)
+library(tidyr)
+library(rLiDAR)
+library(plyr)
+library(lidUrb)
+library(reticulate)
+library(terra)
+library(ITSMe)
+```
+
+## Processamento inicial
+
+### Definir funções
+
+```{r}
+pre_processamento <- function(ctg, out, f_class_solo, res) {
+  # 1. Definição e criação de diretórios
+  cat("Criando diretórios de saída...\n")
+  p_temp  <- paste0(out, "/temp/")      # Path for temporary files
+  p_las_g <- paste0(out, "/LAS_ground/") # Path for LAS de retorno do solo
+  p_dtm   <- paste0(out, "/dtm/")        # Path para DTM (modelo digital do terreno)
+  p_dsm   <- paste0(out, "/dsm/")        # Path para DSM (modelo digital da superfície)
+  p_chm   <- paste0(out, "/chm/")        # Path para CHM (modelo de altura de copa)
+  p_las_n <- paste0(out, "/LAS_norm/")   # Path para LAS normalizado
+  
+  sapply(c(p_temp, p_las_g, p_dtm, p_dsm, p_chm, p_las_n), function(x) {
+    if (!dir.exists(x)) {
+      dir.create(x, recursive = TRUE)
+      cat("Diretório criado:", x, "\n")
+    } else {
+      cat("Diretório já existe:", x, "\n")
+    }
+  })
+  
+  # 2. Classificação do Solo
+  cat("Iniciando classificação do solo usando CSF...\n")
+  opt_output_files(ctg) <- paste0(p_las_g, "/{*}_ground")
+  ctg <- classify_ground(ctg, f_class_solo)
+  cat("Classificação do solo concluída.\n")
+  
+  # 3. Geração de DSM e DTM
+  # DSM
+  cat("Gerando DSM (Digital Surface Model)...\n")
+  opt_output_files(ctg) <- paste0(p_dsm, "/{*}_dsm")
+  rasterize_canopy(ctg, res = res, algorithm = p2r(na.fill = tin()))
+  cat("\nDSM gerado.\n")
+  
+  # DTM
+  cat("Gerando DTM (Digital Terrain Model)...\n")
+  opt_output_files(ctg) <- paste0(p_dtm, "/{*}_dtm")
+  rasterize_terrain(ctg, res = res, algorithm = tin())
+  cat("\nDTM gerado.\n")
+  
+  # 4. Normalização e Geração do CHM
+  cat("Normalizando altura e gerando CHM (Canopy Height Model)...\n")
+  opt_output_files(ctg) <- paste0(p_las_n, "/{*}_norm")
+  ctg <- normalize_height(ctg, tin())
+  ctg_norm <- ctg
+  opt_output_files(ctg) <- paste0(p_chm, "/{*}_chm")
+  rasterize_canopy(ctg, res = res, algorithm = p2r(na.fill = tin()))
+  cat("\nCHM gerado.\n")
+  
+  # 5. Criação dos mosaicos para DSM, DTM e CHM
+  cat("Criando mosaicos a partir dos arquivos .tif...\n")
+  
+  # Função interna para criar mosaico a partir de uma subpasta
+  mosaic_from_folder <- function(sub_folder) {
+    folder <- file.path(out, sub_folder)
+    arquivos <- list.files(folder, pattern = "\\.tif$", full.names = TRUE)
+    if (length(arquivos) == 0) {
+      cat("Nenhum arquivo .tif encontrado em", folder, "\n")
+      return(NULL)
+    }
+    rasters <- lapply(arquivos, raster)
+    mosaico <- do.call(merge, rasters)
+    cat("Mosaico criado para a pasta:", sub_folder, "\n")
+    return(mosaico)
+  }
+  
+  tryCatch({
+    dsm <- mosaic_from_folder("dsm")
+  }, error = function(e) {
+    cat("Erro ao criar mosaico DSM:", e$message, "\n")
+  })
+  
+  tryCatch({
+    dtm <- mosaic_from_folder("dtm")
+  }, error = function(e) {
+    cat("Erro ao criar mosaico DTM:", e$message, "\n")
+  })
+  
+  tryCatch({
+    chm <- mosaic_from_folder("chm")
+  }, error = function(e) {
+    cat("Erro ao criar mosaico CHM:", e$message, "\n")
+  })
+  
+  # 6. Salvando os mosaicos (opcional)
+  cat("Salvando mosaicos...\n")
+  try({
+    writeRaster(dsm, file.path(out, "mosaico_dsm.tif"))
+    writeRaster(dtm, file.path(out, "mosaico_dtm.tif"))
+    writeRaster(chm, file.path(out, "mosaico_chm.tif"))
+  })
+  cat("Mosaicos salvos com sucesso.\n")
+  
+  cat("Pré-processamento concluído.\n")
+  
+  # Retorna uma lista com os principais objetos processados
+  return(list(
+    ctg_norm = ctg_norm,
+    dsm = if(exists("dsm")) dsm else NA,
+    dtm = if(exists("dtm")) dtm else NA,
+    chm = if(exists("chm")) chm else NA
+  ))
+}
+
+estatisticas_e_recorte <- function(files, shp, crop) {
+  cat("Iniciando processamento dos arquivos...\n")
+  estatisticas_df <- NULL
+  
+  # Criação do diretório para armazenar os rasters cortados (crop)
+  if (!dir.exists(crop)) {
+    dir.create(crop, recursive = TRUE)
+    cat("Diretório criado:", crop, "\n")
+  } else {
+    cat("Diretório já existe:", crop, "\n")
+  }
+  
+  # Função interna para calcular estatísticas do raster
+  estatisticas <- function(r) {
+    valores <- values(r, na.rm = TRUE)
+    data.frame(
+      Min = min(valores),
+      Max = max(valores),
+      Media = mean(valores),
+      Mediana = median(valores),
+      Desvio_Padrao = sd(valores)
+    )
+  }
+  
+  # Loop para processar cada arquivo
+  for (i in seq_along(files)) {
+    file <- files[i]
+    cat("Processando arquivo", i, "de", length(files), ":", basename(file), "\n")
+    
+    # Leitura do raster
+    r <- rast(file)
+    crs(r) <- crs(shp)
+    
+    # Crop e mask usando o shapefile
+    r <- crop(r, ext(shp))
+    r <- mask(r, shp)
+    
+    # Plot do raster processado
+    plot(r, main = paste("Raster cortado:", basename(file)))
+    
+    # Salvamento do raster cortado
+    out_file <- file.path(crop, paste0("UAV_crop_", basename(file)))
+    writeRaster(r, out_file, overwrite = TRUE)
+    cat("Raster salvo em:", out_file, "\n")
+    
+    # Cálculo das estatísticas e inclusão do nome do arquivo
+    estat <- estatisticas(r)
+    estat$Arquivo <- basename(file)
+    
+    # Acumula as estatísticas no data.frame
+    estatisticas_df <- rbind(estatisticas_df, estat)
+    cat("Estatísticas calculadas para", basename(file), "\n\n")
+  }
+  
+  cat("Processamento concluído.\n")
+  return(estatisticas_df)
+}
+```
+
+### Pré-processamento
+
+```{r}
+# CONFIGURAR MULTIPROCESSAMENTO
+plan(multisession, workers = (detectCores()-1))
+set_lidr_threads((detectCores()-1))
+
+# CRIAR TILES
+# Definir diretórios
+dir <- "D:/Estagio/08_Codigo/"
+nuvem <- paste0(dir, "/dados/UAV/") # dir da nuvem
+tiles <- paste0(dir, "/dados/02_Tiles_UAV/"); dir.create(tiles, recursive = TRUE)
+
+# Ler nuvem de pontos como ctg
+ctg <- readLAScatalog(paste0(nuvem))
+
+# Criar tiles
+opt_output_files(ctg) <- paste0(tiles, "/tile_{XLEFT}_{YBOTTOM}")
+opt_chunk_buffer(ctg) <- 0
+opt_chunk_size(ctg) <- 20 # tamanho do tile
+plot(ctg, chunk = TRUE)
+ctg <- catalog_retile(ctg) # aplicar retile
+
+# Checar las
+las_check(ctg)
+
+# PRÉ-PROCESSAMENTO
+# Definir diretórios
+dir <- "D:/Estagio/08_Codigo/"
+out <- paste0(dir, "/02_Pre_processamento/UAV/") # Diretório onde serão salvos os resultados do pré-processamento
+dir.create(out, recursive = TRUE)
+tiles <- paste0(dir, "/dados/02_Tiles_UAV/")
+
+# Ler tiles como catalog
+ctg <- readLAScatalog(tiles)
+
+# Executar função de pré-processamento
+f_class_solo = csf(class_threshold = 0.1) # Definir conforme teste do bloco abaixo
+resultados <- pre_processamento(ctg, out, f_class_solo, res = 0.5)
+
+# Checar resultados
+ctg <- readLAScatalog(paste0(out, "/LAS_norm/"))
+las_check(ctg)
+
+# Checar normalização (visualmente)
+coord <- unname(colMeans(st_coordinates(st_centroid(ctg$geometry))))
+las <- clip_circle(ctg, x = coord[1], y = coord[2], radius = 5)
+plot(las, color = "Classification", size = 0.6, bg = "white")
+
+# Salvar ctg tiles (para futuras investigações, se necessário)
+st_write(data.frame(filename = ctg$filename, geometry = st_geometry(ctg$geometry)), paste0(out, "/tiles_uav.gpkg"), append = F)
+```
+
+#### Teste - Adaptar classificação de solo (execute antes da função "pre-processamento")
+
+```{r}
+# TESTE PARA DEFINIR CLASSIFICADOR DE SOLO
+ctg <- readLAScatalog(tiles)
+  # Recorte de amostra para testar classificadores
+  coord <- unname(colMeans(st_coordinates(st_centroid(ctg$geometry))))
+  las <- clip_circle(ctg, x = coord[1], y = coord[2], radius = 10)
+  las <- classify_ground(las, csf(class_threshold = 0.1)) # Funciona bem para a maioria dos casos
+  #las2 <- las[las$Classification == 2]
+  #plot(las2)
+  #las3 <- las[las$Classification != 2]
+  #plot(las3)
+  gnd <- filter_ground(las)
+  plot(gnd, size = 1, bg = "white") 
+  plot(las, color = "Classification", size = 0.6, bg = "white")
+```
+
+### Recortar dsm, dtm e chm e gerar estatísticas para área de interesse (opcional)
+
+```{r}
+dir <- "D:/Estagio/08_Codigo/"
+pasta <- paste0(dir, "/02_Pre_processamento/UAV/")
+files <- list.files(pasta, pattern = ".tif$", full.names = TRUE)
+aoi <- vect(paste0(dir, "/dados/geo/aoi.gpkg"))
+crop <- paste0(pasta, "/crop/") # Pasta onde serão salvos os recortes
+dir.create(crop)
+
+results <- estatisticas_e_recorte(files, aoi, crop)
+```
+
+## Segmentação de árvores individuais (em instância)
+
+### Definir funções
+
+```{r}
+segmentar_arvs_silva2016 <- function(ctg, chm, ws, max_cr_factor, exclusion, out) {
+  # Localizar árvores com função LMF
+  cat("Iniciando detecção de copas com LMF...\n")
+  ttops <- locate_trees(ctg, lmf(ws))
+  cat("Copas detectadas com sucesso!\n")
+  ttops$treeID <- seq_len(nrow(ttops))
+  invisible((st_write(ttops, file.path(out, "ttops.gpkg"), append = F, quiet = T)))
+  cat("Arquivo de copas exportado para 'ttops.gpkg'\n")
+  # Definir o padrão para os arquivos segmentados
+  out_p <- paste0(out, "/tiles/"); dir.create(out_p)
+  try(opt_output_files(ctg) <- file.path(out_p, "{*}_seg"), silent = T)
+  cat("Iniciando segmentação da nuvem de pontos...\n")
+  # Executar a segmentação usando silva2016
+  ctg <<- segment_trees(ctg, silva2016(chm, ttops, max_cr_factor = max_cr_factor, exclusion = exclusion))
+  cat("Segmentação concluída com sucesso!\n")
+  return(ctg)
+}
+```
+
+### Processar
+
+```{r}
+# DEFINIR DIRETÓRIO
+dir <- "D:/Estagio/08_Codigo/"
+out <- paste0(dir, "/03_Processamento/UAV/Segmentacao_instancia/"); dir.create(out, recursive = T)
+
+# CONFIGURAR MULTIPROCESSAMENTO
+plan(multisession, workers = (detectCores()-1))
+set_lidr_threads((detectCores()-1))
+
+# CARREGAR ARQUIVOS NECESSÁRIOS
+ctg <- readLAScatalog(paste0(dir, "/02_Pre_processamento/UAV/LAS_norm/"))
+chm <- raster(paste0(dir, "/02_Pre_processamento/UAV/mosaico_chm.tif"))
+
+# SEGMENTAR ÁRVORES
+## Parâmetros para ttops
+ws <- function(x) {
+  v1 = 5 #v1 e v2: limites das classes
+  v2 = 12
+  min_val = 2 # min_val: valor mínimo (para x >= v2)
+  mid_val = 3.2 # mid_val: valor intermediário (para v1 < x < v2)
+  max_val = 3.5 # max_val: valor máximo (para x <= v1)
+  ifelse(x <= v1, 
+         max_val, # Valor máximo para x <= v1
+         ifelse(x < v2, 
+                mid_val + (x - v1) * (min_val - mid_val) / (v2 - v1), # Gradiente entre v1 e v2
+                min_val)) # Valor mínimo para x >= v2
+}
+
+## Parâmetros para segmentação
+max_cr_factor = 0.3
+exclusion = 0.3
+
+## Testar parâmetros em uma pequena parcela
+### Recortar parcela
+coord <- unname(colMeans(st_coordinates(st_centroid(ctg$geometry))))
+las <- clip_circle(ctg, x = coord[1], y = coord[2], radius = 10); plot(las)
+### Executar
+las <- segmentar_arvs_silva2016(las, chm, ws, max_cr_factor, exclusion, out)
+las <- las[las$Classification != 2]; plot(las, size = 3, color = "treeID")
+
+## Executar na nuvem inteira
+ctg <- segmentar_arvs_silva2016(ctg, chm, ws, max_cr_factor, exclusion, out)
+```
+
+## Extração das métricas
+
+### Definir funções
+
+```{r}
+# Função secundária lidR
+fd = function(X,Y,Z) {
+  M = cbind(X,Y,Z)
+  est.boxcount(M)$estdim
+}
+
+# Função principal para definir métricas de copa
+metricas_copa <- function(file, proporcao_copa, out, plotar) {
+  library(rLiDAR)
+  ids <- unique(file$treeID)
+  ids <- ids[!is.na(ids)]
+  crown_metrics_df <- data.frame()
+  pasta_p_a <- paste0(out, "/plots_c_area/"); pasta_p_v <- paste0(out, "/plots_c_vol/")
+  if (plotar) {dir.create(pasta_p_a); dir.create(pasta_p_v)}
+  pb <- txtProgressBar(0, length(ids), style = 3)
+  for (x in seq_along(ids)) try({
+    id <- ids[x]
+    if (inherits(file, "LAS")) {
+      seg <- filter_poi(file, treeID == id)
+    } else {
+      i <- file[file$treeID == id, ]
+      seg <- clip_roi(ctg, i)
+    }
+    
+    ht <- max(seg$Z) - min(seg$Z)
+    seg <- filter_poi(seg, seg$Classification != 2 & seg$Z >= 0)
+    
+    # rLiDAr
+    xyziId <- seg@data[, .(X, Y, Z, Intensity, treeID)]
+    rLiDAR <- CrownMetrics(xyziId)
+    rLiDAR <- as.data.table(lapply(rLiDAR, unlist))
+    
+    # lidR
+    crown <- crown_metrics(seg, func = .stdtreemetrics, geom = "concave")
+    crown2 <- crown_metrics(seg, func = .stdmetrics)
+    crown3 <- crown_metrics(seg, func = ~as.list(lmom::samlmu(Z)))
+    crown2 <- st_drop_geometry(crown2)
+    crown3 <- st_drop_geometry(crown3)
+    crown <- crown %>%
+      left_join(crown2, by = "treeID") %>%
+      left_join(crown3, by = "treeID")
+    
+    # FILTRAR ÁRV., CLIPAR COPA E CALCULAR MÉTRICAS BÁSICAS
+    seg <- filter_poi(seg, seg$Z >= (1-proporcao_copa) * ht)
+    hc <- max(seg$Z) - min(seg$Z)
+    cc <- as.data.frame(seg@data[, c("X", "Y")])
+    cc <- cc[abs(scale(cc$X)) < 2 & abs(scale(cc$Y)) < 2, ]
+    cc <- cc[chull(cc$X, cc$Y), ]
+    matriz_dist <- as.matrix(dist(cc))
+    dap_max_c <- max(matriz_dist)
+    cc <- cc[chull(cc$X, cc$Y), ]
+    d <- as.matrix(dist(cc))
+    i <- which(d == max(d), arr.ind = TRUE)[1, ]
+    a <- cc[i[1], ]; b <- cc[i[2], ]
+    ang <- atan2(b$Y - a$Y, b$X - a$X) + pi/2
+    proj <- with(cc, (X - a$X) * cos(ang) + (Y - a$Y) * sin(ang))
+    j <- c(which.min(proj), which.max(proj))
+    dap_perp_c <- sqrt(sum((cc[j[1], ] - cc[j[2], ])^2))
+    cc <- rbind(cc, cc[1, ])
+    dist_p <- sqrt(diff(cc$X)^2 + diff(cc$Y)^2)
+    perimetro <- sum(dist_p)
+    
+    # MÉTRICAS lidUrb
+    seg@data$wood <- 0
+    gc_lidUrb <- if (lidR::npoints(seg) > 200) green_crown_volume(seg, npts_in_clust = 200) else list(Green_crown_area = NA, Green_crow_volume = NA, mesh = NULL)
+    if (plotar) {
+      plot_filename <- paste0(pasta_p_v,"lidUrb_", id, ".png")
+      shade3d(gc_lidUrb$mesh,col = "chartreuse4")
+      rgl.snapshot(filename = plot_filename, fmt = "png")
+      close3d()}
+    seg <- seg@data[, c("X", "Y", "Z")]
+    lt_lidUrb <- leaves_traits(seg, layer_thickness = 0.2)
+    
+    # Seleciona os dados e define a altura máxima
+    dados <- lt_lidUrb$LAD_profile
+    names(dados) <- c("altura","LAD")
+    altura_max <- max(dados$altura)
+    
+    # Cria os intervalos com 11 pontos (0% a 100% em 10 etapas)
+    breaks <- seq(0, altura_max, length.out = 11)
+    
+    # Calcula o LAD médio para cada um dos 10 intervalos
+    LAD_medio <- sapply(1:10, function(i) {
+      # Para os intervalos de 1 a 9 usa "<" e para o último utiliza "<=" para incluir a altura máxima
+      cond <- if (i < 10) {
+        dados$altura >= breaks[i] & dados$altura < breaks[i + 1]
+      } else {
+        dados$altura >= breaks[i] & dados$altura <= breaks[i + 1]
+      }
+      mean(dados$LAD[cond], na.rm = TRUE)
+    })
+    
+    # Cria o data frame de saída com os intervalos percentuais (10% a 100%) e os respectivos valores calculados
+    LAD_rel <- data.frame(altura_rel = seq(10, 100, by = 10), LAD_medio = LAD_medio)
+    
+    # MÉTRICAS ITSMe
+    # Gera o plot da crown area, se solicitado
+    plot_filename <- paste0(pasta_p_a,"ITSMe_", id, ".png")
+    if (plotar) {png(filename = plot_filename)}
+    c_area <- projected_area_pc(seg, plot = plotar)
+    if (plotar) {dev.off()}
+    
+    # Gera o plot do crown volume, se solicitado
+    plot_filename <- paste0(pasta_p_v,"ITSMe_", id, ".png")
+    c_vol <- alpha_volume_pc(seg, plot = plotar)
+    if (plotar) {rgl.snapshot(filename = plot_filename, fmt = "png")
+                 close3d()}
+    
+    # Cria um data frame com as métricas de copa
+    df <- data.frame(ID = id,
+                     hc = hc,
+                     perimetro = perimetro,
+                     dap_maior_c = dap_max_c,
+                     dap_perp_c = dap_perp_c,
+                     LAI_1 = lt_lidUrb$LAI,
+                     TLA_1 = lt_lidUrb$TLA,
+                     c_area_1 = gc_lidUrb$Green_crown_area,
+                     c_volume_1 = gc_lidUrb$Green_crow_volume,
+                     c_area_2 = if (plotar) c_area$pa else c_area,
+                     c_volume_2 = if (plotar) c_vol$av else c_vol,
+                     stringsAsFactors = FALSE)
+    
+    # Acumula os resultados
+    df_lad <- as.data.frame(t(LAD_rel$LAD_medio))
+    names(df_lad) <- paste0("LAD_", seq(10, 100, by = 10), "_1")
+    df <- cbind(df, df_lad)
+    names(rLiDAR) <- paste0(names(rLiDAR), "_3")
+    df <- cbind(df, rLiDAR)
+    names(crown) <- paste0(names(crown), "_4")
+    df <- cbind(df, crown)
+    crown_metrics_df <- rbind(crown_metrics_df, df)
+    col_remover <- c("Tree_3", "TotalReturns_3", "HMAX_3", "HMEAN_3", 
+                          "HSD_3", "HKUR_3", "HSKE_3", "H05TH_3", "H10TH_3", 
+                          "H15TH_3", "H20TH_3", "H25TH_3", "H30TH_3", "H35TH_3", 
+                          "H40TH_3", "H45TH_3", "H50TH_3", "H55TH_3", "H60TH_3", 
+                          "H65TH_3", "H70TH_3", "H75TH_3", "H80TH_3", "H90TH_3", 
+                          "H95TH_3", "IMAX_3", "IMIN_3", "IMEAN_3", 
+                          "IMEDIAN_3", "IMODE_3", "IVAR_3", "ISD_3",
+                          "IKUR_3", "treeID_4", "Z_4", "n_4")
+    dff <- crown_metrics_df[, !(names(crown_metrics_df) %in% col_remover)]
+    shp <- st_as_sf(dff, sf_column_name = "geometry_4")
+    write.csv2(dff[, names(dff) != "geometry_4"],
+           file = paste0(out, "/Metricas_UAV.csv"), row.names = F)
+    invisible(sf::st_write(shp, paste0(out, "/Metricas_UAV.gpkg"), append = F, quiet = T))
+
+    setTxtProgressBar(pb, x)
+  })
+  close(pb)
+}
+```
+
+### Processar métricas: lidUrb, lidR, rLiDAR e ITSMe
+
+```{r}
+# DEFINIR DIRETÓRIOS
+dir <- "D:/Estagio/08_Codigo/"
+out <- paste0(dir, "/03_Processamento/UAV/Metricas/"); dir.create(out)
+
+# CARREGAR ARQUIVOS
+ctg <- readLAScatalog(paste0(dir, "/03_Processamento/UAV/Segmentacao_instancia/tiles"))
+aoi <- st_read(paste0(dir, "/dados/geo/aoi.gpkg")) # área para a qual se deseja extrair as métricas
+
+# EXECUTAR
+## Recortar nuvem de pontos para a área de interesse
+np <- clip_roi(ctg, aoi)
+  
+## Calcular métricas
+metricas_copa(np, proporcao_copa = 0.65, out, plotar = F)
+```
+
+## Fazer interseção das métricas com parcelas experimentais (opcional)
+
+```{r}
+# DEFINIR DIRETÓRIOS
+dir <- "D:/Estagio/08_Codigo/"
+out <- paste0(dir, "/04_Bases/UAV/"); dir.create(out, recursive = TRUE)
+
+# ABRIR GEODATASETS
+sf <- st_read(paste0(dir, "/03_Processamento/UAV/Metricas/Metricas_UAV.gpkg"))
+sf_p <- st_read(paste0(dir, "/dados/Parcelas.gpkg"))
+
+# AJUSTAR GEODATASETS
+## Nomes
+names(sf_p)
+names(sf_p) <- c("parcela", "geom")
+
+## Unir com dados de inventário (opcional)
+#inv <- read.csv2(paste0(dir, "/dados/Inventario.csv"))
+#inv <- left_join(inv, sf_p, by = "parcela")
+#sf_p <- st_as_sf(inv, sf_column_name = "geom", crs = st_crs(sf_p))
+
+# INTERSEÇÃO
+sf <- st_centroid(sf)
+sf <- st_transform(sf, st_crs(sf_p))
+st_crs(sf) <- st_crs(sf_p)
+sf_p2 <- st_intersection(sf_p, sf)
+plot(sf_p2)
+
+# SALVAR
+st_write(sf_p2, paste0(out, "/Metricas_UAV_parcelas.gpkg"), append = F)
+```
