@@ -1,14 +1,13 @@
 Tutorial de Instalação do TreeQSM
 
-Passo 1: Baixe e extraia os arquivos do repositório principal:
-🔗 https://github.com/InverseTampere/TreeQSM
-
-Passo 2: Baixe e extraia a pasta TreeQSM deste repositório complementar:
+Passo 1: Baixe e extraia a pasta TreeQSM do repositório* (código alterado):
 🔗 https://github.com/Nat-MZ99/Pipeline-for-extracting-metrics-from-MLS-UAV-LiDAR-and-Combination-forest-data
 
-Passo 3: Mova os arquivos Inicial.m e run_treeqsm.m para a pasta extraída no Passo 1.
+*Repositório original: 🔗 https://github.com/InverseTampere/TreeQSM
 
-Passo 4: Coloque a pasta final (resultante do Passo 1) em um diretório de sua preferência.
+Passo 2: Coloque a pasta em um diretório de sua preferência.
+
+Passo 3: Atualize o caminho da pasta 'TreeQSM/src' em 'Inicial.m'
 
 Requisitos - MATLAB
 O TreeQSM é uma ferramenta desenvolvida em MATLAB, sendo necessária uma licença com os seguintes toolboxes instalados:
