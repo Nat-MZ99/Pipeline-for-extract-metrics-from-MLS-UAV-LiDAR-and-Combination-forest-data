@@ -1,4 +1,4 @@
-# Processamento de nuvens UAV-LiDAR florestais a nível de árvore - DTM, DSM, CHM, Segmentação em instância e semântica + extração de \~100 métricas
+# Processamento de nuvens UAV-LiDAR florestais a nível de árvore - DTM, DSM, CHM, Segmentação em instância + extração de \~100 métricas
 
 ## Pacotes
 
