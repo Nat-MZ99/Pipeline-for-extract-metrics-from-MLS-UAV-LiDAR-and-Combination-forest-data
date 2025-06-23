@@ -4,15 +4,15 @@ Códigos relativos a metodologia desenvolvida no Trabalho de Conclusão de Curso
 **Conjunto de dados para teste**: https://drive.google.com/drive/folders/1Vufd0jYseJBuL0fNt3iprlHt1-q8WreN?usp=sharing
 
 ## Pipeline pré-processamento
-![pre_processamento](https://github.com/user-attachments/assets/484e9988-80f0-4513-9bff-b216b51c6c3c)
+![pre_processamento](https://github.com/user-attachments/assets/614b2193-18a0-48da-a775-fc83e5129031)
 
 
 ## Pipeline processamento UAV-LiDAR
-![processamento_uav](https://github.com/user-attachments/assets/e74997ab-5660-4096-a00d-394324c96cbb)
+![processamento_uav](https://github.com/user-attachments/assets/49507810-5168-465e-b89f-32d4ef9ee6bf)
 
 
 ## Pipeline processamento MLS/MLS+UAV-LiDAR
-![processamento_mls_combinacai](https://github.com/user-attachments/assets/65bfb1d9-a336-48e7-b4a2-f7eedcada657)
+![processamento_mls_combinacao](https://github.com/user-attachments/assets/ae768326-72b7-4004-894b-4a0cec574f11)
 
 
 ## Referências
