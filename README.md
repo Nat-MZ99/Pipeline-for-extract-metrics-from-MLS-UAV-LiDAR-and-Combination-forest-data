@@ -12,7 +12,7 @@ Códigos relativos a metodologia desenvolvida no Trabalho de Conclusão de Curso
 
 
 ## Pipeline processamento MLS/MLS+UAV-LiDAR
-![processamento_mls_combinacao](https://github.com/user-attachments/assets/ae768326-72b7-4004-894b-4a0cec574f11)
+![processamento_mls_combinacao](https://github.com/user-attachments/assets/702b4c76-92f5-4f33-8883-b88fb7dad74d)
 
 
 ## Referências
