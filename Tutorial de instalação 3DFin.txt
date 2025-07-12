@@ -4,7 +4,7 @@ Passo 1: Baixe o programa standalone (3DFin.exe) a partir do link:
 🔗 https://github.com/3DFin/3DFin/releases
 
 Passo 2: Baixe as configurações iniciais disponíveis na pasta 3DFin deste repositório:
-🔗 https://github.com/Nat-MZ99/Pipeline-for-extracting-metrics-from-MLS-UAV-LiDAR-and-Combination-forest-data
+🔗 https://github.com/Nat-MZ99/Pipeline-for-extract-metrics-from-MLS-UAV-LiDAR-and-Combination-forest-data
 
 Passo 3: Mova o arquivo 3DFin.exe e o arquivo de configurações baixado para um diretório de sua preferência.
 
