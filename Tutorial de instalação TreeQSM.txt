@@ -1,7 +1,7 @@
 Tutorial de Instalação do TreeQSM
 
 Passo 1: Baixe e extraia a pasta TreeQSM do repositório* (código alterado):
-🔗 https://github.com/Nat-MZ99/Pipeline-for-extracting-metrics-from-MLS-UAV-LiDAR-and-Combination-forest-data
+🔗 https://github.com/Nat-MZ99/Pipeline-for-extract-metrics-from-MLS-UAV-LiDAR-and-Combination-forest-data
 
 *Repositório original: 🔗 https://github.com/InverseTampere/TreeQSM
 
