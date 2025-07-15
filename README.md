@@ -13,13 +13,13 @@ Codes related to the methodology developed in the Forest Engineering Final Cours
 <img width="5478" height="1750" alt="processamento_mls_combinacao_EN" src="https://github.com/user-attachments/assets/c69ce6a6-e063-4a24-9ae5-a7c58683ebb5" />
 
 ## Instance segmentation breakdown
-<img width="5002" height="2774" alt="instance_segmentation" src="https://github.com/user-attachments/assets/82015c91-c959-4032-9149-4fead9ae80da" />
+<img width="5002" height="2774" alt="instance_segmentation" src="https://github.com/user-attachments/assets/e9e81a24-cc4f-4495-b705-cb513dc7210a" />
 
 ## Semantic segmentation breakdown
 <img width="5236" height="2255" alt="semantic_segmentation" src="https://github.com/user-attachments/assets/9e37aba7-da91-4cec-b776-f361ae5e3218" />
 
 ## Impact of semantic segmentation on QSM modeling
-<img width="3762" height="2272" alt="impact_of_semantic_seg" src="https://github.com/user-attachments/assets/7e51aacc-8fb4-4a1f-a3bc-da0f441f2064" />
+<img width="3762" height="2272" alt="impact_of_semantic_seg" src="https://github.com/user-attachments/assets/2befff40-9a41-47be-bf9e-a9438943b9e8" />
 
 ## References
 **3DFin**: https://github.com/3DFin
