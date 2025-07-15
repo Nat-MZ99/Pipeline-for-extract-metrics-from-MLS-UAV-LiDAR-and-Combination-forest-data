@@ -1,5 +1,5 @@
 # Pipeline-for-extracting-metrics-from-MLS-UAV-LiDAR-and-Combination-forest-data
-Codes related to the methodology developed in the Forest Engineering Final Course Work (UFPR) entitled "Investigation of the potential of applying LiDAR and spectral sensors for automated evaluation of *Eucalyptus* spp. genetic improvement experiments".
+Codes related to the methodology developed in the Forest Engineering Final Course Work (UFPR) entitled "Investigação do potencial da aplicação de sensores LiDAR e espectrais para avaliação automatizada de experimentos de melhoramento genético de *Eucalyptus* spp.".
 
 **Test dataset**: https://drive.google.com/drive/folders/1Vufd0jYseJBuL0fNt3iprlHt1-q8WreN?usp=sharing
 
