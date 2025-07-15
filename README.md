@@ -14,19 +14,34 @@ Codes related to the methodology developed in the Forest Engineering Final Cours
 
 ## References
 **3DFin**: https://github.com/3DFin
+
 **AdTree**: https://github.com/tudelft3d/AdTree
+
 **ITSMe**: https://github.com/lmterryn/ITSMe
+
 **lidUrb**: https://github.com/Blecigne/lidUrb
+
 **ForestClassR**: https://github.com/lucasbielak/ForestClassR
+
 **FSCT**: https://github.com/SKrisanski/FSCT
+
 **rLiDAR**: https://github.com/carlos-alberto-silva/rLiDAR
+
 **TreeQSM**: https://github.com/InverseTampere/TreeQSM
 
+
 LAINO, D. et al. 3DFin: a software for automated 3D forest inventories from terrestrial point clouds. Forestry: An International Journal of Forest Research, Oxford, 2024. Epub ahead of print. DOI: 10.1093/forestry/cpae020.
+
 DU, S. et al. AdTree: Accurate, Detailed, and Automatic Modelling of Laser-Scanned Trees. Remote Sensing, v. 11, n. 18, p. 2074, 2019. DOI: 10.3390/rs11182074.
+
 LOUISE, T. lmterryn/ITSMe: submission release (Version v1.0.0). [S.l.]: Zenodo, 2022. Software. DOI: 10.5281/zenodo.6769105.
+
 LECIGNE, B. lidUrb: Urban trees analyses from terrestrial laser scanning. [S.l.]: GitHub. Disponível em: https://github.com/Blecigne/lidUrb. Acesso em: 19 maio 2025.
+
 BIELAK, L. ForestClassR. [S.l.]: GitHub. Disponível em: https://github.com/lucasbielak/ForestClassR. Acesso em: 19 maio 2025.
+
 KRISANSKI, S. et al. Forest Structural Complexity Tool—An Open Source, Fully-Automated Tool for Measuring Forest Point Clouds. Remote Sensing, v. 13, n. 22, p. 4677, 2021. DOI: 10.3390/rs13224677.
+
 SILVA, C. A. rLiDAR: LiDAR Data Processing and Visualization. [S.l.]: GitHub. Disponível em: https://github.com/carlos-alberto-silva/rLiDAR. Acesso em: 19 maio 2025.
+
 RAUMONEN, P.; ÅKERBLOM, M. InverseTampere/TreeQSM: Version 2.4.1. [S.l.]: Zenodo, 11 maio 2022. Software. DOI: 10.5281/zenodo.6539638.
